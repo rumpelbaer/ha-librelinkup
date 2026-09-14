@@ -217,10 +217,10 @@ class TestLibreLinkUpAuthenticationFailure(unittest.IsolatedAsyncioTestCase):
         api._token = "expired-token"
         api._account_id = "account-id"
 
-        async def fake_login():
-            # A real login restores the credentials the retry needs; the old
-            # token was dropped before this call.
-            self.assertIsNone(api._token)
+        async def fake_login(*, invalidate=None):
+            # A real login restores the credentials the retry needs, and is
+            # told which token was rejected.
+            self.assertEqual(invalidate, "expired-token")
             api._token = "fresh-token"
             api._account_id = "account-id"
 
@@ -236,6 +236,7 @@ class TestLibreLinkUpAuthenticationFailure(unittest.IsolatedAsyncioTestCase):
 
 # --- Response validation (H8) -------------------------------------------------
 
+import asyncio
 import json as _json
 
 import pytest
@@ -243,7 +244,6 @@ from multidict import CIMultiDict, CIMultiDictProxy
 from aiohttp import ContentTypeError, RequestInfo
 
 LibreLinkUpResponseError = api_module.LibreLinkUpResponseError
-LibreLinkUpMeasurementError = api_module.LibreLinkUpMeasurementError
 
 TOKEN = "super-secret-bearer-token"
 PATIENT_ID = "patient-uuid-0001"
@@ -300,9 +300,12 @@ class PayloadSession:
     def __init__(self, **kwargs):
         self._kwargs = kwargs
         self.get_calls = 0
+        self.requested_paths: list[str] = []
 
-    def get(self, *args, **kwargs):
+    def get(self, url=None, *args, **kwargs):
         self.get_calls += 1
+        if url is not None:
+            self.requested_paths.append(url.replace(api_module.DEFAULT_BASE_URL, ""))
         return PayloadResponse(**self._kwargs)
 
 
@@ -340,22 +343,42 @@ async def test_valid_connections_payload() -> None:
     ]
 
 
-async def test_valid_graph_payload() -> None:
-    api, _ = make_api(
-        payload={
-            "status": 0,
-            "data": {"connection": {"glucoseMeasurement": VALID_MEASUREMENT}},
-        }
-    )
-
-    assert await api.async_get_glucose_measurement(PATIENT_ID) == VALID_MEASUREMENT
-
-
 async def test_empty_connection_list_is_valid() -> None:
     """No shared patients is a legitimate answer, not a malformed one."""
     api, _ = make_api(payload={"status": 0, "data": []})
 
     assert await api.async_get_connections() == []
+
+
+async def test_measurements_come_from_connections() -> None:
+    api, _ = make_api(
+        payload={
+            "status": 0,
+            "data": [
+                {"patientId": PATIENT_ID, "glucoseMeasurement": VALID_MEASUREMENT}
+            ],
+        }
+    )
+
+    assert await api.async_get_measurements() == {PATIENT_ID: VALID_MEASUREMENT}
+
+
+async def test_measurements_never_request_the_graph_endpoint() -> None:
+    """H6: the polling path must not pull twelve hours of history any more."""
+    api, session = make_api(
+        payload={
+            "status": 0,
+            "data": [
+                {"patientId": PATIENT_ID, "glucoseMeasurement": VALID_MEASUREMENT}
+            ],
+        }
+    )
+
+    await api.async_get_measurements()
+
+    assert session.requested_paths == ["/llu/connections"]
+    assert not any("graph" in path for path in session.requested_paths)
+    assert not hasattr(api, "async_get_glucose_measurement")
 
 
 async def test_trend_arrow_zero_and_zero_glucose_stay_valid() -> None:
@@ -364,11 +387,11 @@ async def test_trend_arrow_zero_and_zero_glucose_stay_valid() -> None:
     api, _ = make_api(
         payload={
             "status": 0,
-            "data": {"connection": {"glucoseMeasurement": measurement}},
+            "data": [{"patientId": PATIENT_ID, "glucoseMeasurement": measurement}],
         }
     )
 
-    assert await api.async_get_glucose_measurement(PATIENT_ID) == measurement
+    assert await api.async_get_measurements() == {PATIENT_ID: measurement}
 
 
 # B. Top level is not a dict --------------------------------------------------
@@ -397,11 +420,11 @@ async def test_non_success_status_is_rejected(status) -> None:
     assert_no_sensitive_data(caught.value)
 
 
-async def test_non_success_status_is_rejected_on_graph() -> None:
-    api, _ = make_api(payload={"status": 2, "data": {}})
+async def test_non_success_status_is_rejected_for_measurements() -> None:
+    api, _ = make_api(payload={"status": 2, "data": []})
 
     with pytest.raises(LibreLinkUpResponseError):
-        await api.async_get_glucose_measurement(PATIENT_ID)
+        await api.async_get_measurements()
 
 
 # D-F. Connections structure --------------------------------------------------
@@ -458,104 +481,124 @@ async def test_one_broken_connection_invalidates_the_whole_list() -> None:
         await api.async_get_connections()
 
 
-# G-I. Graph structure --------------------------------------------------------
+# G. Exact patient selection --------------------------------------------------
 
-@pytest.mark.parametrize("data", [[], "invalid", None, 7])
-async def test_graph_data_must_be_a_dict(data) -> None:
-    api, _ = make_api(payload={"status": 0, "data": data})
-
-    with pytest.raises(LibreLinkUpResponseError) as caught:
-        await api.async_get_glucose_measurement(PATIENT_ID)
-
-    assert_no_sensitive_data(caught.value)
-
-
-@pytest.mark.parametrize("connection", [[], "invalid", 3])
-async def test_graph_connection_must_be_a_dict(connection) -> None:
-    api, _ = make_api(payload={"status": 0, "data": {"connection": connection}})
-
-    with pytest.raises(LibreLinkUpResponseError) as caught:
-        await api.async_get_glucose_measurement(PATIENT_ID)
-
-    assert_no_sensitive_data(caught.value)
+def three_patients(order=("patient-a", "patient-b", "patient-c")):
+    values = {"patient-a": 76, "patient-b": 249, "patient-c": 110}
+    return {
+        "status": 0,
+        "data": [
+            {
+                "patientId": patient_id,
+                "glucoseMeasurement": {
+                    **VALID_MEASUREMENT,
+                    "ValueInMgPerDl": values[patient_id],
+                },
+            }
+            for patient_id in order
+        ],
+    }
 
 
-@pytest.mark.parametrize("measurement", ["invalid", [], 1.0, [VALID_MEASUREMENT]])
-async def test_measurement_with_wrong_type_is_rejected(measurement) -> None:
-    api, _ = make_api(
-        payload={
-            "status": 0,
-            "data": {"connection": {"glucoseMeasurement": measurement}},
-        }
-    )
+async def test_each_patient_keeps_its_own_measurement() -> None:
+    api, _ = make_api(payload=three_patients())
 
-    with pytest.raises(LibreLinkUpResponseError) as caught:
-        await api.async_get_glucose_measurement(PATIENT_ID)
+    measurements = await api.async_get_measurements()
 
-    assert not isinstance(caught.value, LibreLinkUpMeasurementError)
-    assert_no_sensitive_data(caught.value)
-
-
-# J. Missing measurement ------------------------------------------------------
-
-@pytest.mark.parametrize(
-    "connection",
-    [{}, {"glucoseMeasurement": {}}, {"glucoseMeasurement": None}],
-)
-async def test_missing_measurement_raises_measurement_error(connection) -> None:
-    api, _ = make_api(payload={"status": 0, "data": {"connection": connection}})
-
-    with pytest.raises(LibreLinkUpMeasurementError) as caught:
-        await api.async_get_glucose_measurement(PATIENT_ID)
-
-    assert_no_sensitive_data(caught.value)
-
-
-async def test_measurement_error_is_a_response_error() -> None:
-    """One except clause must be able to cover both."""
-    assert issubclass(LibreLinkUpMeasurementError, LibreLinkUpResponseError)
-
-
-# K. Required fields ----------------------------------------------------------
-
-@pytest.mark.parametrize(
-    "field", ["ValueInMgPerDl", "FactoryTimestamp", "TrendArrow"]
-)
-async def test_missing_required_field_is_rejected(field) -> None:
-    measurement = {k: v for k, v in VALID_MEASUREMENT.items() if k != field}
-    api, _ = make_api(
-        payload={
-            "status": 0,
-            "data": {"connection": {"glucoseMeasurement": measurement}},
-        }
-    )
-
-    with pytest.raises(LibreLinkUpMeasurementError) as caught:
-        await api.async_get_glucose_measurement(PATIENT_ID)
-
-    assert_no_sensitive_data(caught.value)
+    assert measurements["patient-a"]["ValueInMgPerDl"] == 76
+    assert measurements["patient-b"]["ValueInMgPerDl"] == 249
+    assert measurements["patient-c"]["ValueInMgPerDl"] == 110
 
 
 @pytest.mark.parametrize(
-    "field", ["ValueInMgPerDl", "FactoryTimestamp", "TrendArrow"]
+    "order",
+    [
+        ("patient-a", "patient-b", "patient-c"),
+        ("patient-c", "patient-a", "patient-b"),
+        ("patient-b", "patient-c", "patient-a"),
+    ],
 )
-@pytest.mark.parametrize("value", [[], {}])
-async def test_structurally_broken_required_field_is_rejected(field, value) -> None:
+async def test_list_order_does_not_change_the_mapping(order) -> None:
+    """Selection is by patient ID, never by position in the list."""
+    api, _ = make_api(payload=three_patients(order))
+
+    measurements = await api.async_get_measurements()
+
+    assert measurements["patient-a"]["ValueInMgPerDl"] == 76
+    assert measurements["patient-b"]["ValueInMgPerDl"] == 249
+    assert measurements["patient-c"]["ValueInMgPerDl"] == 110
+
+
+async def test_unknown_patient_is_simply_absent() -> None:
+    """No fallback: an unconfigured patient never stands in for another."""
+    api, _ = make_api(payload=three_patients())
+
+    measurements = await api.async_get_measurements()
+
+    assert "patient-d" not in measurements
+    assert measurements.get("patient-d") is None
+
+
+# H-K. Unusable measurements are per patient ----------------------------------
+
+@pytest.mark.parametrize(
+    "measurement",
+    [
+        None,
+        {},
+        "invalid",
+        [],
+        1.0,
+        {"ValueInMgPerDl": 115},
+        {**VALID_MEASUREMENT, "ValueInMgPerDl": None},
+        {**VALID_MEASUREMENT, "FactoryTimestamp": None},
+        {**VALID_MEASUREMENT, "TrendArrow": None},
+        {**VALID_MEASUREMENT, "ValueInMgPerDl": []},
+        {**VALID_MEASUREMENT, "FactoryTimestamp": {}},
+        {**VALID_MEASUREMENT, "TrendArrow": []},
+    ],
+)
+async def test_unusable_measurement_maps_to_none(measurement) -> None:
     api, _ = make_api(
         payload={
             "status": 0,
-            "data": {
-                "connection": {
-                    "glucoseMeasurement": {**VALID_MEASUREMENT, field: value}
-                }
-            },
+            "data": [{"patientId": PATIENT_ID, "glucoseMeasurement": measurement}],
         }
     )
 
-    with pytest.raises(LibreLinkUpResponseError) as caught:
-        await api.async_get_glucose_measurement(PATIENT_ID)
+    assert await api.async_get_measurements() == {PATIENT_ID: None}
 
-    assert_no_sensitive_data(caught.value)
+
+async def test_one_unusable_measurement_does_not_hide_the_others() -> None:
+    """The central fan-out guarantee: B being broken must not affect A and C."""
+    api, _ = make_api(
+        payload={
+            "status": 0,
+            "data": [
+                {
+                    "patientId": "patient-a",
+                    "glucoseMeasurement": {
+                        **VALID_MEASUREMENT,
+                        "ValueInMgPerDl": 76,
+                    },
+                },
+                {"patientId": "patient-b", "glucoseMeasurement": None},
+                {
+                    "patientId": "patient-c",
+                    "glucoseMeasurement": {
+                        **VALID_MEASUREMENT,
+                        "ValueInMgPerDl": 110,
+                    },
+                },
+            ],
+        }
+    )
+
+    measurements = await api.async_get_measurements()
+
+    assert measurements["patient-a"]["ValueInMgPerDl"] == 76
+    assert measurements["patient-b"] is None
+    assert measurements["patient-c"]["ValueInMgPerDl"] == 110
 
 
 async def test_numeric_string_value_stays_accepted() -> None:
@@ -564,11 +607,11 @@ async def test_numeric_string_value_stays_accepted() -> None:
     api, _ = make_api(
         payload={
             "status": 0,
-            "data": {"connection": {"glucoseMeasurement": measurement}},
+            "data": [{"patientId": PATIENT_ID, "glucoseMeasurement": measurement}],
         }
     )
 
-    assert await api.async_get_glucose_measurement(PATIENT_ID) == measurement
+    assert await api.async_get_measurements() == {PATIENT_ID: measurement}
 
 
 async def test_missing_is_low_and_is_high_stay_accepted() -> None:
@@ -581,11 +624,11 @@ async def test_missing_is_low_and_is_high_stay_accepted() -> None:
     api, _ = make_api(
         payload={
             "status": 0,
-            "data": {"connection": {"glucoseMeasurement": measurement}},
+            "data": [{"patientId": PATIENT_ID, "glucoseMeasurement": measurement}],
         }
     )
 
-    assert await api.async_get_glucose_measurement(PATIENT_ID) == measurement
+    assert await api.async_get_measurements() == {PATIENT_ID: measurement}
 
 
 # L. Broken JSON --------------------------------------------------------------
@@ -646,3 +689,121 @@ async def test_http_errors_keep_their_status(status) -> None:
     assert not isinstance(caught.value, LibreLinkUpResponseError)
     # No pointless re-login attempt for a non-auth failure.
     assert session.get_calls == 1
+
+
+# --- Login lock (M4, now real concurrency through the shared client) ---------
+
+
+class LoginCountingSession:
+    """Counts login POSTs and lets the test hold the login open."""
+
+    def __init__(self, gate: asyncio.Event | None = None, fail: bool = False):
+        self.login_calls = 0
+        self.get_calls = 0
+        self._gate = gate
+        self._fail = fail
+
+    def post(self, *args, **kwargs):
+        self.login_calls += 1
+        session = self
+
+        class _Login:
+            async def __aenter__(self):
+                if session._gate is not None:
+                    await session._gate.wait()
+                return self
+
+            async def __aexit__(self, *exc):
+                return False
+
+            status = 200
+
+            def raise_for_status(self):
+                return None
+
+            async def json(self):
+                if session._fail:
+                    return {"status": 2}
+                return {
+                    "status": 0,
+                    "data": {
+                        "user": {"id": "user-id"},
+                        "authTicket": {"token": TOKEN},
+                    },
+                }
+
+        return _Login()
+
+    def get(self, url=None, *args, **kwargs):
+        self.get_calls += 1
+        return PayloadResponse(
+            payload={
+                "status": 0,
+                "data": [
+                    {"patientId": PATIENT_ID, "glucoseMeasurement": VALID_MEASUREMENT}
+                ],
+            }
+        )
+
+
+async def test_concurrent_requests_trigger_exactly_one_login() -> None:
+    gate = asyncio.Event()
+    session = LoginCountingSession(gate=gate)
+    api = api_module.LibreLinkUpApi(session, EMAIL, PASSWORD)
+
+    task_a = asyncio.create_task(api.async_get_measurements())
+    task_b = asyncio.create_task(api.async_get_measurements())
+    task_c = asyncio.create_task(api.async_get_measurements())
+
+    await asyncio.sleep(0)
+    gate.set()
+
+    results = await asyncio.gather(task_a, task_b, task_c)
+
+    assert session.login_calls == 1
+    assert all(result == {PATIENT_ID: VALID_MEASUREMENT} for result in results)
+    assert api._token == TOKEN
+
+
+async def test_concurrent_reauth_triggers_exactly_one_login() -> None:
+    """Two requests seeing the same rejected token must not log in twice."""
+    session = LoginCountingSession()
+    api = api_module.LibreLinkUpApi(session, EMAIL, PASSWORD)
+    api._token = "expired-token"
+    api._account_id = "account-id"
+
+    await asyncio.gather(
+        api.async_login(invalidate="expired-token"),
+        api.async_login(invalidate="expired-token"),
+    )
+
+    assert session.login_calls == 1
+
+
+async def test_login_is_skipped_when_another_request_already_refreshed() -> None:
+    session = LoginCountingSession()
+    api = api_module.LibreLinkUpApi(session, EMAIL, PASSWORD)
+    api._token = "fresh-token"
+    api._account_id = "account-id"
+
+    await api.async_login(invalidate="a-different-rejected-token")
+
+    assert session.login_calls == 0
+    assert api._token == "fresh-token"
+
+
+async def test_failed_login_releases_the_lock() -> None:
+    session = LoginCountingSession(fail=True)
+    api = api_module.LibreLinkUpApi(session, EMAIL, PASSWORD)
+
+    with pytest.raises(LibreLinkUpAuthenticationError):
+        await api.async_login()
+
+    assert not api._login_lock.locked()
+
+    # A later attempt can log in again once the server recovers.
+    session._fail = False
+    await api.async_login()
+
+    assert api._token == TOKEN
+    assert session.login_calls == 2

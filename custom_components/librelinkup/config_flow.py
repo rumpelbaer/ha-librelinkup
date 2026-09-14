@@ -144,15 +144,19 @@ class LibreLinkUpConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 ):
                     errors["base"] = "no_connections"
                 else:
-                    new_data = {
-                        **self._reauth_entry.data,
-                        CONF_PASSWORD: password,
-                    }
-
-                    self.hass.config_entries.async_update_entry(
-                        self._reauth_entry,
-                        data=new_data,
-                    )
+                    # Every entry of this account shares one client, so they
+                    # must all carry the password that was just confirmed --
+                    # otherwise whichever entry loads first after a restart
+                    # would decide which password the account runs on.
+                    for other in self.hass.config_entries.async_entries(DOMAIN):
+                        if (
+                            other.data.get(CONF_EMAIL) == email
+                            and other.data.get(CONF_PASSWORD) != password
+                        ):
+                            self.hass.config_entries.async_update_entry(
+                                other,
+                                data={**other.data, CONF_PASSWORD: password},
+                            )
 
                     await self.hass.config_entries.async_reload(
                         self._reauth_entry.entry_id

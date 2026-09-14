@@ -1,20 +1,18 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from datetime import datetime, timedelta
 from email.utils import parsedate_to_datetime
 
 from aiohttp import ClientResponseError
 
-from homeassistant.config_entries import ConfigEntry, ConfigEntryAuthFailed
-from homeassistant.const import CONF_EMAIL, CONF_PASSWORD
+from homeassistant.config_entries import ConfigEntryAuthFailed
 from homeassistant.core import HomeAssistant
-from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 from homeassistant.util import dt as dt_util
 
 from .api import LibreLinkUpApi, LibreLinkUpAuthenticationError
-from .const import CONF_PATIENT_ID
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -36,7 +34,7 @@ def _error_label(err: Exception) -> str:
     """Describe an error for logging without leaking anything.
 
     Never the exception message: a ClientResponseError renders its URL, which
-    contains the patient ID, and its repr() contains the bearer token.
+    contains a patient ID, and its repr() contains the bearer token.
     """
     if isinstance(err, ClientResponseError):
         return f"HTTP {err.status}"
@@ -65,27 +63,31 @@ def _parse_retry_after(value: str | None) -> timedelta | None:
     return retry_at - dt_util.utcnow()
 
 
-class LibreLinkUpCoordinator(DataUpdateCoordinator[dict]):
-    def __init__(self, hass: HomeAssistant, entry: ConfigEntry) -> None:
+class LibreLinkUpAccountCoordinator(DataUpdateCoordinator[dict[str, dict]]):
+    """Polls /llu/connections once per LibreLinkUp account.
+
+    One instance serves every config entry of the same account, so three shared
+    patients cost one login and one request per interval instead of three.
+    Its data maps patient ID to that patient's latest known measurement.
+    """
+
+    def __init__(self, hass: HomeAssistant, api: LibreLinkUpApi) -> None:
         super().__init__(
             hass,
             logger=_LOGGER,
             name="LibreLinkUp",
             update_interval=DEFAULT_UPDATE_INTERVAL,
+            # Deliberately not bound to a config entry: the coordinator outlives
+            # any single entry, and binding it would make Home Assistant shut it
+            # down as soon as the first of several entries is unloaded.
+            config_entry=None,
         )
 
-        session = async_get_clientsession(hass)
+        self.api = api
 
-        self.api = LibreLinkUpApi(
-            session,
-            entry.data[CONF_EMAIL],
-            entry.data[CONF_PASSWORD],
-        )
-
-        # Required by async_setup_entry, which rejects entries without it.
-        # Never derived from the API: picking a connection here could silently
-        # attach the entry to a different person.
-        self.patient_id: str = entry.data[CONF_PATIENT_ID]
+        # Set by the runtime so an account-wide auth failure can raise reauth
+        # for exactly one entry instead of one per patient.
+        self.async_request_reauth: Callable[[], None] | None = None
 
         # Stays None until a fetch actually succeeded, so a restart can never
         # look like "last success just now" and hand out a grace period that
@@ -94,14 +96,36 @@ class LibreLinkUpCoordinator(DataUpdateCoordinator[dict]):
         self._failure_label: str | None = None
         self._server_error_count = 0
 
-    async def _async_update_data(self) -> dict:
+        # Per patient, so one person without a reading never drags the rest of
+        # the account down with them.
+        self._patient_seen: dict[str, datetime] = {}
+        self._patient_problem_logged: set[str] = set()
+
+    # -- entry facing ------------------------------------------------------
+
+    def measurement_for(self, patient_id: str) -> dict | None:
+        """The latest known measurement of exactly this patient."""
+        return (self.data or {}).get(patient_id)
+
+    def is_patient_available(self, patient_id: str) -> bool:
+        """Whether this patient's reading is recent enough to serve."""
+        last_seen = self._patient_seen.get(patient_id)
+
+        if last_seen is None:
+            return False
+
+        return dt_util.utcnow() - last_seen < STALE_FAILURE_GRACE_PERIOD
+
+    # -- polling -----------------------------------------------------------
+
+    async def _async_update_data(self) -> dict[str, dict]:
         try:
-            measurement = await self.api.async_get_glucose_measurement(
-                self.patient_id
-            )
+            measurements = await self.api.async_get_measurements()
 
         except LibreLinkUpAuthenticationError as err:
-            # Only raised when the login itself rejected the credentials.
+            if self.async_request_reauth is not None:
+                self.async_request_reauth()
+
             raise ConfigEntryAuthFailed(
                 "LibreLinkUp authentication failed"
             ) from err
@@ -109,11 +133,12 @@ class LibreLinkUpCoordinator(DataUpdateCoordinator[dict]):
         except Exception as err:
             return self._handle_failure(err)
 
-        self._handle_success()
-        return measurement
+        return self._handle_success(measurements)
 
-    def _handle_success(self) -> None:
-        self._last_successful_update = dt_util.utcnow()
+    def _handle_success(self, measurements: dict[str, dict | None]) -> dict[str, dict]:
+        now = dt_util.utcnow()
+
+        self._last_successful_update = now
         self._server_error_count = 0
 
         if self.update_interval != DEFAULT_UPDATE_INTERVAL:
@@ -123,7 +148,22 @@ class LibreLinkUpCoordinator(DataUpdateCoordinator[dict]):
             _LOGGER.info("LibreLinkUp updates recovered")
             self._failure_label = None
 
-    def _handle_failure(self, err: Exception) -> dict:
+        # Start from what we already knew: a patient who is momentarily without
+        # a reading keeps their previous one until their own grace period ends.
+        snapshot = dict(self.data or {})
+
+        for patient_id, measurement in measurements.items():
+            if measurement is None:
+                self._log_patient_problem(patient_id)
+                continue
+
+            snapshot[patient_id] = measurement
+            self._patient_seen[patient_id] = now
+            self._patient_problem_logged.discard(patient_id)
+
+        return snapshot
+
+    def _handle_failure(self, err: Exception) -> dict[str, dict]:
         label = _error_label(err)
         backoff = self._apply_backoff(err)
         self._log_failure(label)
@@ -132,7 +172,7 @@ class LibreLinkUpCoordinator(DataUpdateCoordinator[dict]):
             return self.data
 
         # Static message, and "from None" so the original exception cannot
-        # reach a traceback with the token or the patient ID in it.
+        # reach a traceback with the token or a patient ID in it.
         raise UpdateFailed(
             "LibreLinkUp data update failed",
             retry_after=backoff.total_seconds() if backoff else None,
@@ -142,14 +182,16 @@ class LibreLinkUpCoordinator(DataUpdateCoordinator[dict]):
         if self._last_successful_update is None:
             return False
 
-        age = dt_util.utcnow() - self._last_successful_update
-        return age < STALE_FAILURE_GRACE_PERIOD
+        return dt_util.utcnow() - self._last_successful_update < (
+            STALE_FAILURE_GRACE_PERIOD
+        )
 
     def _apply_backoff(self, err: Exception) -> timedelta | None:
         """Slow polling down for server-side failures. Returns the new delay.
 
-        Applied only to rate limits and server errors: a malformed payload or
-        a missing measurement is not something the server needs relief from.
+        Applied only to rate limits and server errors: a malformed payload is
+        not something the server needs relief from. Because the coordinator is
+        shared, one 429 slows the whole account down exactly once.
         """
         if not isinstance(err, ClientResponseError):
             return None
@@ -174,6 +216,8 @@ class LibreLinkUpCoordinator(DataUpdateCoordinator[dict]):
         self.update_interval = delay
         return delay
 
+    # -- logging -----------------------------------------------------------
+
     def _log_failure(self, label: str) -> None:
         """Warn once per failure phase, and again if the failure changes kind."""
         if self._failure_label == label:
@@ -185,3 +229,14 @@ class LibreLinkUpCoordinator(DataUpdateCoordinator[dict]):
             label,
         )
         self._failure_label = label
+
+    def _log_patient_problem(self, patient_id: str) -> None:
+        """Warn once per patient, never identifying them in the log."""
+        if patient_id in self._patient_problem_logged:
+            return
+
+        _LOGGER.warning(
+            "LibreLinkUp reported no usable measurement for a shared person; "
+            "their entities will go unavailable if this persists"
+        )
+        self._patient_problem_logged.add(patient_id)

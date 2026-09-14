@@ -9,8 +9,8 @@ from homeassistant.helpers.entity import EntityCategory
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
-from .const import DOMAIN
-from .coordinator import LibreLinkUpCoordinator
+from .const import CONF_PATIENT_ID
+from .coordinator import LibreLinkUpAccountCoordinator
 from .entity import build_device_info
 from .utils import parse_libre_timestamp
 
@@ -23,7 +23,7 @@ async def async_setup_entry(
     entry: ConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ) -> None:
-    coordinator: LibreLinkUpCoordinator = hass.data[DOMAIN][entry.entry_id]
+    coordinator: LibreLinkUpAccountCoordinator = entry.runtime_data
 
     async_add_entities(
         [
@@ -35,18 +35,30 @@ async def async_setup_entry(
 
 
 class LibreLinkUpBinarySensorBase(
-    CoordinatorEntity[LibreLinkUpCoordinator],
+    CoordinatorEntity[LibreLinkUpAccountCoordinator],
     BinarySensorEntity,
 ):
     _attr_has_entity_name = True
 
     def __init__(
         self,
-        coordinator: LibreLinkUpCoordinator,
+        coordinator: LibreLinkUpAccountCoordinator,
         entry: ConfigEntry,
     ) -> None:
         super().__init__(coordinator)
+        self._patient_id: str = entry.data[CONF_PATIENT_ID]
         self._attr_device_info = build_device_info(entry)
+
+    @property
+    def _measurement(self) -> dict:
+        """This entry's patient only -- never the whole account snapshot."""
+        return self.coordinator.measurement_for(self._patient_id) or {}
+
+    @property
+    def available(self) -> bool:
+        return super().available and self.coordinator.is_patient_available(
+            self._patient_id
+        )
 
 
 class LibreLinkUpDataStaleSensor(LibreLinkUpBinarySensorBase):
@@ -56,7 +68,7 @@ class LibreLinkUpDataStaleSensor(LibreLinkUpBinarySensorBase):
 
     def __init__(
         self,
-        coordinator: LibreLinkUpCoordinator,
+        coordinator: LibreLinkUpAccountCoordinator,
         entry: ConfigEntry,
     ) -> None:
         super().__init__(coordinator, entry)
@@ -65,7 +77,7 @@ class LibreLinkUpDataStaleSensor(LibreLinkUpBinarySensorBase):
     @property
     def is_on(self) -> bool:
         measured_at = parse_libre_timestamp(
-            self.coordinator.data.get("FactoryTimestamp")
+            self._measurement.get("FactoryTimestamp")
         )
 
         if measured_at is None:
@@ -79,7 +91,7 @@ class LibreLinkUpLowSensor(LibreLinkUpBinarySensorBase):
 
     def __init__(
         self,
-        coordinator: LibreLinkUpCoordinator,
+        coordinator: LibreLinkUpAccountCoordinator,
         entry: ConfigEntry,
     ) -> None:
         super().__init__(coordinator, entry)
@@ -87,7 +99,7 @@ class LibreLinkUpLowSensor(LibreLinkUpBinarySensorBase):
 
     @property
     def is_on(self) -> bool:
-        return bool(self.coordinator.data.get("isLow"))
+        return bool(self._measurement.get("isLow"))
 
 
 class LibreLinkUpHighSensor(LibreLinkUpBinarySensorBase):
@@ -95,7 +107,7 @@ class LibreLinkUpHighSensor(LibreLinkUpBinarySensorBase):
 
     def __init__(
         self,
-        coordinator: LibreLinkUpCoordinator,
+        coordinator: LibreLinkUpAccountCoordinator,
         entry: ConfigEntry,
     ) -> None:
         super().__init__(coordinator, entry)
@@ -103,4 +115,4 @@ class LibreLinkUpHighSensor(LibreLinkUpBinarySensorBase):
 
     @property
     def is_on(self) -> bool:
-        return bool(self.coordinator.data.get("isHigh"))
+        return bool(self._measurement.get("isHigh"))

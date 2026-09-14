@@ -10,8 +10,8 @@ from homeassistant.helpers.entity import EntityCategory
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
-from .const import DOMAIN
-from .coordinator import LibreLinkUpCoordinator
+from .const import CONF_PATIENT_ID
+from .coordinator import LibreLinkUpAccountCoordinator
 from .entity import build_device_info
 from .utils import mg_dl_to_mmol_l, parse_libre_timestamp
 
@@ -31,7 +31,7 @@ async def async_setup_entry(
     entry: ConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ) -> None:
-    coordinator: LibreLinkUpCoordinator = hass.data[DOMAIN][entry.entry_id]
+    coordinator: LibreLinkUpAccountCoordinator = entry.runtime_data
 
     async_add_entities(
         [
@@ -44,18 +44,30 @@ async def async_setup_entry(
 
 
 class LibreLinkUpSensorBase(
-    CoordinatorEntity[LibreLinkUpCoordinator],
+    CoordinatorEntity[LibreLinkUpAccountCoordinator],
     SensorEntity,
 ):
     _attr_has_entity_name = True
 
     def __init__(
         self,
-        coordinator: LibreLinkUpCoordinator,
+        coordinator: LibreLinkUpAccountCoordinator,
         entry: ConfigEntry,
     ) -> None:
         super().__init__(coordinator)
+        self._patient_id: str = entry.data[CONF_PATIENT_ID]
         self._attr_device_info = build_device_info(entry)
+
+    @property
+    def _measurement(self) -> dict:
+        """This entry's patient only -- never the whole account snapshot."""
+        return self.coordinator.measurement_for(self._patient_id) or {}
+
+    @property
+    def available(self) -> bool:
+        return super().available and self.coordinator.is_patient_available(
+            self._patient_id
+        )
 
 
 class LibreLinkUpGlucoseSensor(LibreLinkUpSensorBase):
@@ -68,7 +80,7 @@ class LibreLinkUpGlucoseSensor(LibreLinkUpSensorBase):
 
     def __init__(
         self,
-        coordinator: LibreLinkUpCoordinator,
+        coordinator: LibreLinkUpAccountCoordinator,
         entry: ConfigEntry,
     ) -> None:
         super().__init__(coordinator, entry)
@@ -78,11 +90,11 @@ class LibreLinkUpGlucoseSensor(LibreLinkUpSensorBase):
     def native_value(self) -> float | None:
         # "Value" follows the unit configured in the LibreLinkUp account and is
         # therefore ambiguous; "ValueInMgPerDl" is the only unit-explicit field.
-        return mg_dl_to_mmol_l(self.coordinator.data.get("ValueInMgPerDl"))
+        return mg_dl_to_mmol_l(self._measurement.get("ValueInMgPerDl"))
 
     @property
     def extra_state_attributes(self) -> dict:
-        data = self.coordinator.data
+        data = self._measurement
         mg_dl = data.get("ValueInMgPerDl")
 
         return {
@@ -104,7 +116,7 @@ class LibreLinkUpTrendSensor(LibreLinkUpSensorBase):
 
     def __init__(
         self,
-        coordinator: LibreLinkUpCoordinator,
+        coordinator: LibreLinkUpAccountCoordinator,
         entry: ConfigEntry,
     ) -> None:
         super().__init__(coordinator, entry)
@@ -112,13 +124,13 @@ class LibreLinkUpTrendSensor(LibreLinkUpSensorBase):
 
     @property
     def native_value(self) -> str | None:
-        code = self.coordinator.data.get("TrendArrow")
+        code = self._measurement.get("TrendArrow")
         trend = TREND_MAP.get(code)
         return trend[0] if trend else None
 
     @property
     def extra_state_attributes(self) -> dict:
-        code = self.coordinator.data.get("TrendArrow")
+        code = self._measurement.get("TrendArrow")
         trend = TREND_MAP.get(code)
 
         return {
@@ -134,7 +146,7 @@ class LibreLinkUpLastReadingSensor(LibreLinkUpSensorBase):
 
     def __init__(
         self,
-        coordinator: LibreLinkUpCoordinator,
+        coordinator: LibreLinkUpAccountCoordinator,
         entry: ConfigEntry,
     ) -> None:
         super().__init__(coordinator, entry)
@@ -143,7 +155,7 @@ class LibreLinkUpLastReadingSensor(LibreLinkUpSensorBase):
     @property
     def native_value(self) -> datetime | None:
         return parse_libre_timestamp(
-            self.coordinator.data.get("FactoryTimestamp")
+            self._measurement.get("FactoryTimestamp")
         )
 
 
@@ -155,7 +167,7 @@ class LibreLinkUpReadingAgeSensor(LibreLinkUpSensorBase):
 
     def __init__(
         self,
-        coordinator: LibreLinkUpCoordinator,
+        coordinator: LibreLinkUpAccountCoordinator,
         entry: ConfigEntry,
     ) -> None:
         super().__init__(coordinator, entry)
@@ -164,7 +176,7 @@ class LibreLinkUpReadingAgeSensor(LibreLinkUpSensorBase):
     @property
     def native_value(self) -> int | None:
         measured_at = parse_libre_timestamp(
-            self.coordinator.data.get("FactoryTimestamp")
+            self._measurement.get("FactoryTimestamp")
         )
 
         if measured_at is None:

@@ -11,14 +11,15 @@ from aiohttp import ClientResponseError, RequestInfo
 from homeassistant.config_entries import ConfigEntryAuthFailed
 from homeassistant.const import CONF_EMAIL, CONF_PASSWORD
 from homeassistant.helpers.update_coordinator import UpdateFailed
+from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.util import dt as dt_util
 from multidict import CIMultiDict, CIMultiDictProxy
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.librelinkup.api import (
+    LibreLinkUpApi,
     LibreLinkUpAuthenticationError,
     LibreLinkUpAuthorizationError,
-    LibreLinkUpMeasurementError,
     LibreLinkUpResponseError,
 )
 from custom_components.librelinkup.const import (
@@ -33,7 +34,7 @@ from custom_components.librelinkup.coordinator import (
     MIN_BACKOFF,
     RATE_LIMIT_DEFAULT_DELAY,
     STALE_FAILURE_GRACE_PERIOD,
-    LibreLinkUpCoordinator,
+    LibreLinkUpAccountCoordinator,
 )
 
 EMAIL = "user@example.com"
@@ -75,36 +76,30 @@ def http_error(status: int, retry_after: str | None = None) -> ClientResponseErr
 
 @pytest.fixture
 async def coordinator(hass):
-    entry = MockConfigEntry(
-        domain=DOMAIN,
-        data={
-            CONF_EMAIL: EMAIL,
-            CONF_PASSWORD: PASSWORD,
-            CONF_PATIENT_ID: PATIENT_ID,
-            CONF_PATIENT_NAME: "Test User",
-        },
-        unique_id="a",
-    )
-    entry.add_to_hass(hass)
-    return LibreLinkUpCoordinator(hass, entry)
+    api = LibreLinkUpApi(async_get_clientsession(hass), EMAIL, PASSWORD)
+    return LibreLinkUpAccountCoordinator(hass, api)
 
 
 def with_previous_success(coordinator, *, minutes_ago: float):
-    """Give the coordinator a valid measurement fetched some minutes ago."""
-    coordinator.data = dict(MEASUREMENT)
-    coordinator._last_successful_update = dt_util.utcnow() - timedelta(
-        minutes=minutes_ago
-    )
+    """Give the coordinator a snapshot fetched some minutes ago."""
+    seen = dt_util.utcnow() - timedelta(minutes=minutes_ago)
+    coordinator.data = {PATIENT_ID: dict(MEASUREMENT)}
+    coordinator._last_successful_update = seen
+    coordinator._patient_seen[PATIENT_ID] = seen
     return coordinator
 
 
 def fail_with(coordinator, error):
-    coordinator.api.async_get_glucose_measurement = AsyncMock(side_effect=error)
+    coordinator.api.async_get_measurements = AsyncMock(side_effect=error)
 
 
-def succeed(coordinator, measurement=None):
-    coordinator.api.async_get_glucose_measurement = AsyncMock(
-        return_value=measurement or dict(MEASUREMENT)
+def succeed(coordinator, measurements=None):
+    coordinator.api.async_get_measurements = AsyncMock(
+        return_value=(
+            measurements
+            if measurements is not None
+            else {PATIENT_ID: dict(MEASUREMENT)}
+        )
     )
 
 
@@ -112,7 +107,6 @@ TRANSIENT_ERRORS = [
     pytest.param(TimeoutError(), id="timeout"),
     pytest.param(http_error(503), id="http-503"),
     pytest.param(http_error(429), id="http-429"),
-    pytest.param(LibreLinkUpMeasurementError("no measurement"), id="measurement"),
     pytest.param(LibreLinkUpResponseError("malformed"), id="response"),
     pytest.param(LibreLinkUpAuthorizationError("rejected"), id="authorization"),
 ]
@@ -126,7 +120,7 @@ async def test_keeps_last_measurement_inside_grace_period(coordinator, error) ->
     with_previous_success(coordinator, minutes_ago=5)
     fail_with(coordinator, error)
 
-    assert await coordinator._async_update_data() == MEASUREMENT
+    assert await coordinator._async_update_data() == {PATIENT_ID: MEASUREMENT}
 
 
 @pytest.mark.parametrize("error", TRANSIENT_ERRORS)
@@ -148,7 +142,7 @@ async def test_grace_period_boundary(coordinator) -> None:
 
     with_previous_success(coordinator, minutes_ago=grace_minutes - 1)
     fail_with(coordinator, TimeoutError())
-    assert await coordinator._async_update_data() == MEASUREMENT
+    assert await coordinator._async_update_data() == {PATIENT_ID: MEASUREMENT}
 
     with_previous_success(coordinator, minutes_ago=grace_minutes + 1)
     fail_with(coordinator, TimeoutError())
@@ -195,7 +189,7 @@ async def test_recovery_resets_failure_state(coordinator) -> None:
 
     succeed(coordinator)
     before = dt_util.utcnow()
-    assert await coordinator._async_update_data() == MEASUREMENT
+    assert await coordinator._async_update_data() == {PATIENT_ID: MEASUREMENT}
 
     assert coordinator._failure_label is None
     assert coordinator._server_error_count == 0
@@ -223,7 +217,7 @@ async def test_rate_limit_backoff(coordinator, retry_after, expected) -> None:
     with_previous_success(coordinator, minutes_ago=1)
     fail_with(coordinator, http_error(429, retry_after=retry_after))
 
-    assert await coordinator._async_update_data() == MEASUREMENT
+    assert await coordinator._async_update_data() == {PATIENT_ID: MEASUREMENT}
     assert coordinator.update_interval == expected
 
 
@@ -318,7 +312,6 @@ async def test_server_error_backoff_resets_after_success(coordinator) -> None:
 @pytest.mark.parametrize(
     "error",
     [
-        LibreLinkUpMeasurementError("no measurement"),
         LibreLinkUpResponseError("malformed"),
         LibreLinkUpAuthorizationError("rejected"),
         TimeoutError(),
@@ -445,7 +438,7 @@ async def test_transient_authorization_failure_does_not_trigger_reauth(
     with_previous_success(coordinator, minutes_ago=1)
     fail_with(coordinator, error)
 
-    assert await coordinator._async_update_data() == MEASUREMENT
+    assert await coordinator._async_update_data() == {PATIENT_ID: MEASUREMENT}
 
 
 @pytest.mark.parametrize("error", [LibreLinkUpAuthorizationError("x"), http_error(403)])
@@ -461,3 +454,132 @@ async def test_transient_authorization_failure_eventually_fails_update(
 
 async def test_authorization_error_is_not_an_authentication_error() -> None:
     assert not issubclass(LibreLinkUpAuthorizationError, LibreLinkUpAuthenticationError)
+
+
+# --- Per patient state inside the shared snapshot -----------------------------
+
+
+OTHER_PATIENT = "patient-other"
+
+
+async def test_snapshot_keeps_patients_apart(coordinator) -> None:
+    succeed(
+        coordinator,
+        {
+            PATIENT_ID: {**MEASUREMENT, "ValueInMgPerDl": 76},
+            OTHER_PATIENT: {**MEASUREMENT, "ValueInMgPerDl": 249},
+        },
+    )
+
+    await coordinator.async_refresh()
+
+    assert coordinator.measurement_for(PATIENT_ID)["ValueInMgPerDl"] == 76
+    assert coordinator.measurement_for(OTHER_PATIENT)["ValueInMgPerDl"] == 249
+    assert coordinator.measurement_for("nobody") is None
+
+
+async def test_unknown_patient_is_never_available(coordinator) -> None:
+    succeed(coordinator, {PATIENT_ID: dict(MEASUREMENT)})
+    await coordinator.async_refresh()
+
+    assert coordinator.is_patient_available(PATIENT_ID) is True
+    assert coordinator.is_patient_available("nobody") is False
+
+
+async def test_patient_without_a_reading_keeps_the_others_fresh(coordinator) -> None:
+    succeed(
+        coordinator,
+        {
+            PATIENT_ID: {**MEASUREMENT, "ValueInMgPerDl": 76},
+            OTHER_PATIENT: {**MEASUREMENT, "ValueInMgPerDl": 249},
+        },
+    )
+    await coordinator.async_refresh()
+
+    succeed(
+        coordinator,
+        {
+            PATIENT_ID: {**MEASUREMENT, "ValueInMgPerDl": 80},
+            OTHER_PATIENT: None,
+        },
+    )
+    await coordinator.async_refresh()
+
+    # The account poll succeeded, so this is not an account level failure.
+    assert coordinator.last_update_success is True
+    assert coordinator.measurement_for(PATIENT_ID)["ValueInMgPerDl"] == 80
+    # The other patient keeps their last reading for their own grace period.
+    assert coordinator.measurement_for(OTHER_PATIENT)["ValueInMgPerDl"] == 249
+    assert coordinator.is_patient_available(OTHER_PATIENT) is True
+
+
+async def test_patient_grace_period_expires_individually(coordinator) -> None:
+    succeed(
+        coordinator,
+        {PATIENT_ID: dict(MEASUREMENT), OTHER_PATIENT: dict(MEASUREMENT)},
+    )
+    await coordinator.async_refresh()
+
+    coordinator._patient_seen[OTHER_PATIENT] = (
+        dt_util.utcnow() - STALE_FAILURE_GRACE_PERIOD - timedelta(minutes=1)
+    )
+
+    assert coordinator.is_patient_available(PATIENT_ID) is True
+    assert coordinator.is_patient_available(OTHER_PATIENT) is False
+
+
+async def test_patient_problem_warns_only_once(coordinator, caplog) -> None:
+    succeed(coordinator, {PATIENT_ID: dict(MEASUREMENT), OTHER_PATIENT: None})
+    caplog.set_level(logging.DEBUG)
+
+    for _ in range(4):
+        await coordinator.async_refresh()
+
+    warnings = [
+        record
+        for record in caplog.records
+        if record.levelno == logging.WARNING and "no usable measurement" in record.getMessage()
+    ]
+
+    assert len(warnings) == 1
+    assert OTHER_PATIENT not in caplog.text
+    assert PATIENT_ID not in caplog.text
+
+
+async def test_patient_problem_warns_again_after_recovery(coordinator, caplog) -> None:
+    succeed(coordinator, {OTHER_PATIENT: None})
+    await coordinator.async_refresh()
+
+    succeed(coordinator, {OTHER_PATIENT: dict(MEASUREMENT)})
+    await coordinator.async_refresh()
+
+    caplog.clear()
+    caplog.set_level(logging.DEBUG)
+
+    succeed(coordinator, {OTHER_PATIENT: None})
+    await coordinator.async_refresh()
+
+    warnings = [
+        record
+        for record in caplog.records
+        if record.levelno == logging.WARNING and "no usable measurement" in record.getMessage()
+    ]
+
+    assert len(warnings) == 1
+
+
+async def test_account_failure_reports_reauth_once(coordinator) -> None:
+    calls = []
+    coordinator.async_request_reauth = lambda: calls.append(1)
+
+    fail_with(coordinator, LibreLinkUpAuthenticationError("rejected"))
+
+    with pytest.raises(ConfigEntryAuthFailed):
+        await coordinator._async_update_data()
+
+    assert len(calls) == 1
+
+
+async def test_coordinator_is_not_bound_to_a_config_entry(coordinator) -> None:
+    """Binding it would shut the shared poll down with the first entry."""
+    assert coordinator.config_entry is None

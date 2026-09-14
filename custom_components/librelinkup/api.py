@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 
 from aiohttp import ClientResponse, ClientResponseError, ClientSession, ContentTypeError
@@ -53,10 +54,6 @@ class LibreLinkUpResponseError(Exception):
     """
 
 
-class LibreLinkUpMeasurementError(LibreLinkUpResponseError):
-    """The API replied successfully but carried no usable measurement."""
-
-
 # Fields the integration actually consumes. isLow/isHigh are intentionally not
 # required: the binary sensors coerce them with bool(), so a missing flag
 # degrades to "off" instead of discarding an otherwise valid glucose reading.
@@ -65,6 +62,30 @@ REQUIRED_MEASUREMENT_FIELDS = (
     "FactoryTimestamp",
     "TrendArrow",
 )
+
+
+def _measurement_problem(measurement: object) -> str | None:
+    """Return why a glucoseMeasurement is unusable, or None if it is fine.
+
+    Returns a label instead of raising: /llu/connections carries every shared
+    patient at once, so one unusable reading must not invalidate the readings
+    of everybody else on the account.
+    """
+    if not isinstance(measurement, dict) or not measurement:
+        return "missing"
+
+    for field in REQUIRED_MEASUREMENT_FIELDS:
+        value = measurement.get(field)
+
+        # "is None" rather than a falsy check: TrendArrow 0 ("not determined")
+        # and a glucose value of 0 are legitimate readings.
+        if value is None:
+            return "incomplete"
+
+        if isinstance(value, (list, dict)):
+            return "malformed"
+
+    return None
 
 
 async def _async_read_json(response: ClientResponse) -> object:
@@ -123,6 +144,18 @@ class LibreLinkUpApi:
         self._account_id: str | None = None
         self._base_url = DEFAULT_BASE_URL
         self._region: str | None = None
+        # The client is shared by every config entry of one account, so two
+        # requests can genuinely need a login at the same time.
+        self._login_lock = asyncio.Lock()
+
+    def update_password(self, password: str) -> None:
+        """Adopt freshly re-authenticated credentials and drop the old token."""
+        if password == self._password:
+            return
+
+        self._password = password
+        self._token = None
+        self._account_id = None
 
     @property
     def region(self) -> str | None:
@@ -132,7 +165,23 @@ class LibreLinkUpApi:
     def base_url(self) -> str:
         return self._base_url
 
-    async def async_login(self) -> None:
+    async def async_login(self, *, invalidate: str | None = None) -> None:
+        """Log in, unless another request already did it while we waited.
+
+        `invalidate` is the token the caller saw rejected. If the stored token
+        has meanwhile been replaced by a different one, somebody else already
+        recovered and no second login is sent to Abbott.
+        """
+        async with self._login_lock:
+            if self._token and self._account_id and self._token != invalidate:
+                return
+
+            self._token = None
+            self._account_id = None
+
+            await self._async_login_locked()
+
+    async def _async_login_locked(self) -> None:
         for _ in range(2):
             async with self._session.post(
                 f"{self._base_url}/llu/auth/login",
@@ -210,6 +259,8 @@ class LibreLinkUpApi:
             await self.async_login()
 
         for attempt in range(2):
+            token_used = self._token
+
             try:
                 async with self._session.get(
                     f"{self._base_url}{path}",
@@ -235,11 +286,9 @@ class LibreLinkUpApi:
                         "LibreLinkUp rejected the request after re-authentication"
                     ) from None
 
-                # Drop the rejected token so the retry cannot reuse it.
-                self._token = None
-                self._account_id = None
-
-                await self.async_login()
+                # The rejected token is named so a concurrent request that has
+                # already refreshed it does not trigger a second login.
+                await self.async_login(invalidate=token_used)
                 continue
 
             return _validate_envelope(result)
@@ -277,53 +326,24 @@ class LibreLinkUpApi:
 
         return connections
 
-    async def async_get_glucose_measurement(
-        self,
-        patient_id: str,
-    ) -> dict:
-        result = await self._async_get_authenticated(
-            f"/llu/connections/{patient_id}/graph"
-        )
+    async def async_get_measurements(self) -> dict[str, dict | None]:
+        """Current measurement of every shared patient, from one request.
 
-        data = result.get("data")
+        Uses /llu/connections, which already carries the current
+        glucoseMeasurement per connection. The former /graph call returned the
+        same reading plus roughly twelve hours of history that was discarded.
 
-        if not isinstance(data, dict):
-            raise LibreLinkUpResponseError(
-                "LibreLinkUp API returned malformed data"
+        A patient whose reading is missing or unusable maps to None, so callers
+        can tell "not shared any more" (absent key) apart from "shared but no
+        usable reading right now" (None).
+        """
+        connections = await self.async_get_connections()
+
+        return {
+            connection["patientId"]: (
+                connection.get("glucoseMeasurement")
+                if _measurement_problem(connection.get("glucoseMeasurement")) is None
+                else None
             )
-
-        connection = data.get("connection")
-
-        if not isinstance(connection, dict):
-            raise LibreLinkUpResponseError(
-                "LibreLinkUp API returned malformed data"
-            )
-
-        measurement = connection.get("glucoseMeasurement")
-
-        if measurement is None or measurement == {}:
-            raise LibreLinkUpMeasurementError(
-                "LibreLinkUp returned no glucose measurement"
-            )
-
-        if not isinstance(measurement, dict):
-            raise LibreLinkUpResponseError(
-                "LibreLinkUp API returned malformed data"
-            )
-
-        for field in REQUIRED_MEASUREMENT_FIELDS:
-            value = measurement.get(field)
-
-            # "is None" rather than a falsy check: TrendArrow 0 ("not
-            # determined") and a glucose value of 0 are legitimate readings.
-            if value is None:
-                raise LibreLinkUpMeasurementError(
-                    "LibreLinkUp glucose measurement is missing required fields"
-                )
-
-            if isinstance(value, (list, dict)):
-                raise LibreLinkUpResponseError(
-                    "LibreLinkUp API returned malformed data"
-                )
-
-        return measurement
+            for connection in connections
+        }
