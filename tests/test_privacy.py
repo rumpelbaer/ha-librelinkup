@@ -121,8 +121,25 @@ async def test_unconfigured_people_never_enter_the_snapshot(hass, caplog) -> Non
         assert patient_id not in caplog.text
 
     # No glucose value of an unconfigured person anywhere in the runtime.
-    for value in STRANGER_VALUES.values():
-        assert str(value) not in str(coordinator.data)
+    #
+    # Field by field, never against str(coordinator.data): a reading carries
+    # its timestamps as well, so stranger-2's value of 42 matched every reading
+    # taken in second :42 and failed this test roughly once in 35 runs without
+    # a single stranger being anywhere near the snapshot.
+    #
+    # Both glucose fields are checked, built through the same helper the
+    # strangers' own readings come from, so a changed payload shape cannot
+    # quietly narrow what is being looked for.
+    stranger_glucose = {
+        field: {measurement(value=value)[field] for value in STRANGER_VALUES.values()}
+        for field in ("ValueInMgPerDl", "Value")
+    }
+
+    for patient_id, reading in coordinator.data.items():
+        for field, forbidden in stranger_glucose.items():
+            assert reading[field] not in forbidden, (
+                f"{patient_id}'s {field} is an unconfigured person's reading"
+            )
 
 
 async def test_a_stranger_without_a_reading_is_not_worth_a_warning(
