@@ -15,15 +15,23 @@
         "data": {
           "patient_id": "Person"
         }
+      },
+      "reauth_confirm": {
+        "title": "LibreLinkUp erneut authentifizieren",
+        "description": "Gib das aktuelle Passwort deines LibreLinkUp-Kontos ein.",
+        "data": {
+          "password": "Passwort"
+        }
       }
     },
     "error": {
       "invalid_auth": "E-Mail-Adresse oder Passwort ist ungültig.",
       "cannot_connect": "Verbindung zu LibreLinkUp konnte nicht hergestellt werden.",
       "no_connections": "Für dieses LibreLinkUp-Konto wurden keine Verbindungen gefunden."
+    },
+    "abort": {
+      "reauth_successful": "Die erneute Authentifizierung war erfolgreich.",
+      "already_configured": "Diese LibreLinkUp-Verbindung ist bereits eingerichtet."
     }
-  },
-  "abort": {
-    "reauth_successful": "Die erneute Authentifizierung war erfolgreich."
   }
 }

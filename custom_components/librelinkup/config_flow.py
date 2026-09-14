@@ -9,9 +9,40 @@ from homeassistant import config_entries
 from homeassistant.const import CONF_EMAIL, CONF_PASSWORD
 from homeassistant.data_entry_flow import FlowResult
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
+from homeassistant.helpers.selector import (
+    TextSelector,
+    TextSelectorConfig,
+    TextSelectorType,
+)
 
 from .api import LibreLinkUpApi, LibreLinkUpAuthenticationError
 from .const import CONF_PATIENT_ID, CONF_PATIENT_NAME, DOMAIN
+
+
+PASSWORD_SELECTOR = TextSelector(
+    TextSelectorConfig(
+        type=TextSelectorType.PASSWORD,
+        autocomplete="current-password",
+    )
+)
+
+STEP_USER_DATA_SCHEMA = vol.Schema(
+    {
+        vol.Required(CONF_EMAIL): TextSelector(
+            TextSelectorConfig(
+                type=TextSelectorType.EMAIL,
+                autocomplete="email",
+            )
+        ),
+        vol.Required(CONF_PASSWORD): PASSWORD_SELECTOR,
+    }
+)
+
+STEP_REAUTH_DATA_SCHEMA = vol.Schema(
+    {
+        vol.Required(CONF_PASSWORD): PASSWORD_SELECTOR,
+    }
+)
 
 
 class LibreLinkUpConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
@@ -64,16 +95,9 @@ class LibreLinkUpConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     }
                     return await self.async_step_connection()
 
-        schema = vol.Schema(
-            {
-                vol.Required(CONF_EMAIL): str,
-                vol.Required(CONF_PASSWORD): str,
-            }
-        )
-
         return self.async_show_form(
             step_id="user",
-            data_schema=schema,
+            data_schema=STEP_USER_DATA_SCHEMA,
             errors=errors,
         )
 
@@ -138,11 +162,7 @@ class LibreLinkUpConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
         return self.async_show_form(
             step_id="reauth_confirm",
-            data_schema=vol.Schema(
-                {
-                    vol.Required(CONF_PASSWORD): str,
-                }
-            ),
+            data_schema=STEP_REAUTH_DATA_SCHEMA,
             errors=errors,
         )
 

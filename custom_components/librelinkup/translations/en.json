@@ -15,15 +15,23 @@
         "data": {
           "patient_id": "Person"
         }
+      },
+      "reauth_confirm": {
+        "title": "Re-authenticate LibreLinkUp",
+        "description": "Enter the current password for your LibreLinkUp account.",
+        "data": {
+          "password": "Password"
+        }
       }
     },
     "error": {
       "invalid_auth": "Invalid email address or password.",
       "cannot_connect": "Could not connect to LibreLinkUp.",
       "no_connections": "No LibreLinkUp connections were found for this account."
+    },
+    "abort": {
+      "reauth_successful": "Re-authentication was successful.",
+      "already_configured": "This LibreLinkUp connection is already configured."
     }
-  },
-  "abort": {
-    "reauth_successful": "Re-authentication was successful."
   }
 }
