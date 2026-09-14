@@ -7,6 +7,7 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import UnitOfBloodGlucoseConcentration, UnitOfTime
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.device_registry import DeviceInfo
+from homeassistant.helpers.entity import EntityCategory
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
@@ -99,6 +100,8 @@ class LibreLinkUpGlucoseSensor(LibreLinkUpSensorBase):
 
 class LibreLinkUpTrendSensor(LibreLinkUpSensorBase):
     _attr_name = "Trend"
+    _attr_device_class = SensorDeviceClass.ENUM
+    _attr_options = ["not_determined", "falling_rapidly", "falling", "stable", "rising", "rising_rapidly"]
 
     def __init__(
         self,
@@ -127,6 +130,7 @@ class LibreLinkUpTrendSensor(LibreLinkUpSensorBase):
 
 class LibreLinkUpLastReadingSensor(LibreLinkUpSensorBase):
     _attr_name = "Last Reading"
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
     _attr_device_class = SensorDeviceClass.TIMESTAMP
 
     def __init__(
@@ -146,6 +150,7 @@ class LibreLinkUpLastReadingSensor(LibreLinkUpSensorBase):
 
 class LibreLinkUpReadingAgeSensor(LibreLinkUpSensorBase):
     _attr_name = "Reading Age"
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
     _attr_native_unit_of_measurement = UnitOfTime.MINUTES
     _attr_state_class = SensorStateClass.MEASUREMENT
 
