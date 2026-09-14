@@ -650,6 +650,46 @@ async def test_an_unsupported_region_fails_permanently(hass) -> None:
         assert not hass.data.get(DOMAIN)
 
 
+async def test_rejected_credentials_fail_setup_and_release_the_account(hass) -> None:
+    """The third setup outcome: a password the account no longer accepts.
+
+    Unlike a region error this asks the user for their password again rather
+    than failing permanently -- and, like every failed setup, it has to leave
+    the shared runtime exactly as it found it.
+    """
+    from homeassistant.config_entries import ConfigEntryState
+
+    from custom_components.librelinkup.api import LibreLinkUpAuthenticationError
+
+    entry = make_entry(hass, 0)
+    login, poll, flow_login, flow_connections = account_patch(snapshot(entry))
+
+    with (
+        login,
+        patch(
+            "custom_components.librelinkup.coordinator.LibreLinkUpApi.async_get_measurements",
+            new=AsyncMock(side_effect=LibreLinkUpAuthenticationError("rejected")),
+        ),
+        flow_login,
+        flow_connections,
+    ):
+        await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+
+        # ConfigEntryAuthFailed, so Home Assistant asks for the password again.
+        assert entry.state is ConfigEntryState.SETUP_ERROR
+        assert [
+            flow
+            for flow in hass.config_entries.flow.async_progress()
+            if flow["context"]["source"] == SOURCE_REAUTH
+        ]
+
+        # Nothing of the entry stayed behind: no account runtime, and the entry
+        # does not point at a coordinator it was released from.
+        assert not hass.data.get(DOMAIN)
+        assert getattr(entry, "runtime_data", None) is None
+
+
 async def test_a_network_failure_still_gets_retried(hass) -> None:
     """The counterpart: a transient failure must stay a retry."""
     from aiohttp import ClientConnectionError

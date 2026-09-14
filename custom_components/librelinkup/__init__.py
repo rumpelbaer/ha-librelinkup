@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, field
+from typing import NoReturn
 
 from homeassistant.config_entries import SOURCE_REAUTH, ConfigEntry
 from homeassistant.const import CONF_EMAIL, CONF_PASSWORD
@@ -87,14 +88,44 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     accounts: dict[str, AccountRuntime] = hass.data.setdefault(DOMAIN, {})
     key = account_key(entry)
+
+    runtime = await _async_get_or_create_runtime(hass, accounts, key, entry)
+
+    # Registering the patient before any refresh is what lets the poll below
+    # cover this person at all -- the coordinator drops everything it is not
+    # configured for.
+    runtime.entries[entry.entry_id] = patient_id
+    runtime.coordinator.async_set_configured_patients(runtime.patient_ids)
+    _async_bind_runtime(hass, runtime)
+    _async_apply_polling_preference(hass, runtime)
+
+    await _async_initial_refresh(hass, runtime, key, entry, patient_id)
+
+    # Only now: an entry whose initial refresh failed was released above and
+    # must not be left pointing at the account's coordinator.
+    entry.runtime_data = runtime.coordinator
+
+    await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+    return True
+
+
+async def _async_get_or_create_runtime(
+    hass: HomeAssistant,
+    accounts: dict[str, AccountRuntime],
+    key: str,
+    entry: ConfigEntry,
+) -> AccountRuntime:
+    """The one runtime of this account, created when its first entry loads.
+
+    Every entry of an account shares one client and one coordinator, so the
+    second person of an account joins what the first one started rather than
+    opening a second session to Abbott.
+    """
     runtime = accounts.get(key)
+    password = entry.data[CONF_PASSWORD]
 
     if runtime is None:
-        api = LibreLinkUpApi(
-            async_get_clientsession(hass),
-            key,
-            entry.data[CONF_PASSWORD],
-        )
+        api = LibreLinkUpApi(async_get_clientsession(hass), key, password)
         coordinator = LibreLinkUpAccountCoordinator(hass, api)
         # The coordinator is not bound to a config entry, so Home Assistant does
         # not stop it on shutdown by itself.
@@ -102,51 +133,56 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         runtime = AccountRuntime(
             api=api,
             coordinator=coordinator,
-            password=entry.data[CONF_PASSWORD],
+            password=password,
         )
         accounts[key] = runtime
-    elif runtime.password != entry.data[CONF_PASSWORD]:
+
+    elif runtime.password != password:
         # An entry being set up carries the most recently confirmed password
         # (both the reauth flow and adding a person reload or write every entry
         # of the account), so it wins over what the shared client was started
         # with. The old token is dropped with it.
-        runtime.password = entry.data[CONF_PASSWORD]
-        runtime.api.update_password(entry.data[CONF_PASSWORD])
+        runtime.password = password
+        runtime.api.update_password(password)
 
-    runtime.entries[entry.entry_id] = patient_id
-    runtime.coordinator.async_set_configured_patients(runtime.patient_ids)
-    _async_bind_runtime(hass, runtime)
-    _async_apply_polling_preference(hass, runtime)
+    return runtime
 
+
+async def _async_initial_refresh(
+    hass: HomeAssistant,
+    runtime: AccountRuntime,
+    key: str,
+    entry: ConfigEntry,
+    patient_id: str,
+) -> None:
+    """Give this entry data to build its entities from, polling if needed.
+
+    Entries of one account are set up concurrently, so the lock keeps each of
+    them from firing its own poll: whoever gets here first covers every patient
+    registered by then.
+
+    There are two quite different reasons to poll here, and only the first one
+    can fail the setup -- the account having no usable data at all, as opposed
+    to it polling happily for somebody else.
+    """
     async with runtime.setup_lock:
         coordinator = runtime.coordinator
 
         if coordinator.data is None or not coordinator.last_update_success:
-            # Also covers the reload after a successful reauth: Home Assistant
-            # stops scheduling refreshes once an update raised
-            # ConfigEntryAuthFailed and expects the reload to restart the
-            # coordinator -- which a shared coordinator survives, so the account
-            # would never poll again without this refresh.
+            # The account has nothing to serve. Also covers the reload after a
+            # successful reauth: Home Assistant stops scheduling refreshes once
+            # an update raised ConfigEntryAuthFailed and expects the reload to
+            # restart the coordinator -- which a shared coordinator survives, so
+            # the account would never poll again without this refresh.
             await coordinator.async_refresh()
 
             if not coordinator.last_update_success:
                 failure = coordinator.last_exception
+                # Released before raising, so a failed setup leaves neither the
+                # entry nor its patient behind in the shared runtime.
                 await _async_release(hass, key, entry.entry_id)
 
-                if isinstance(failure, ConfigEntryAuthFailed):
-                    raise ConfigEntryAuthFailed(
-                        "LibreLinkUp authentication failed"
-                    ) from None
-
-                if isinstance(failure, ConfigEntryError):
-                    # Raised by the coordinator with a static message; re-raised
-                    # as is, with "from None" so its own cause -- which may
-                    # render a request URL -- is dropped.
-                    raise failure from None
-
-                raise ConfigEntryNotReady(
-                    "LibreLinkUp initial data update failed"
-                ) from None
+                _raise_setup_failure(failure)
 
         elif coordinator.measurement_for(patient_id) is None:
             # A person added to an account that is already polling should not
@@ -157,10 +193,26 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             # patient that was already registered.
             await coordinator.async_refresh()
 
-    entry.runtime_data = runtime.coordinator
 
-    await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
-    return True
+def _raise_setup_failure(failure: Exception | None) -> NoReturn:
+    """Tell Home Assistant what to do about a failed initial update.
+
+    The one place that decides between a re-authentication dialog, a permanent
+    error and a retry. It raises rather than returning the exception so that
+    these messages stay literal strings inside a raise, where test_security can
+    still see them.
+
+    "from None" throughout: the cause may render a request URL, and a
+    ClientResponseError's repr() carries the bearer token.
+    """
+    if isinstance(failure, ConfigEntryAuthFailed):
+        raise ConfigEntryAuthFailed("LibreLinkUp authentication failed") from None
+
+    if isinstance(failure, ConfigEntryError):
+        # Raised by the coordinator with a static message; re-raised as is.
+        raise failure from None
+
+    raise ConfigEntryNotReady("LibreLinkUp initial data update failed") from None
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
