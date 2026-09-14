@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from homeassistant.components.sensor import SensorDeviceClass, SensorEntity
+from homeassistant.components.sensor import SensorDeviceClass, SensorEntity, SensorStateClass
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import UnitOfBloodGlucoseConcentration
 from homeassistant.core import HomeAssistant
@@ -27,6 +27,7 @@ class LibreLinkUpGlucoseSensor(
     _attr_name = "LibreLinkUp Glucose"
     _attr_device_class = SensorDeviceClass.BLOOD_GLUCOSE_CONCENTRATION
     _attr_native_unit_of_measurement = UnitOfBloodGlucoseConcentration.MILLIMOLE_PER_LITER
+    _attr_state_class = SensorStateClass.MEASUREMENT
 
     def __init__(
         self,
