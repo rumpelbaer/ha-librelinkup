@@ -12,13 +12,12 @@ from .coordinator import LibreLinkUpCoordinator
 
 
 TREND_MAP = {
+    0: ("not_determined", None),
     1: ("falling_rapidly", "↓↓"),
     2: ("falling", "↓"),
-    3: ("falling_slowly", "↘"),
-    4: ("stable", "→"),
-    5: ("rising_slowly", "↗"),
-    6: ("rising", "↑"),
-    7: ("rising_rapidly", "↑↑"),
+    3: ("stable", "→"),
+    4: ("rising", "↑"),
+    5: ("rising_rapidly", "↑↑"),
 }
 
 
