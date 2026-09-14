@@ -357,6 +357,30 @@ def test_parse_libre_timestamp_invalid(raw) -> None:
     assert parse_libre_timestamp(raw) is None
 
 
+@pytest.mark.parametrize(
+    "raw",
+    [
+        123,
+        12.5,
+        True,
+        False,
+        ["9/14/2026 11:12:35 AM"],
+        {"FactoryTimestamp": "9/14/2026 11:12:35 AM"},
+        ("9/14/2026 11:12:35 AM",),
+        object(),
+    ],
+)
+def test_parse_libre_timestamp_rejects_non_strings(raw) -> None:
+    """A value straight out of a JSON payload need not be a string at all.
+
+    These used to raise AttributeError on .strip(), and the exception escaped
+    the measurement validation: /llu/connections carries every shared patient
+    in one response, so a single reading with a numeric FactoryTimestamp failed
+    the whole account's poll and cost every other patient their reading.
+    """
+    assert parse_libre_timestamp(raw) is None
+
+
 def test_parse_libre_timestamp_does_not_call_strptime() -> None:
     """Guard against reintroducing the locale-dependent %p directive.
 

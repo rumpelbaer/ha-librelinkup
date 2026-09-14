@@ -25,13 +25,19 @@ LIBRE_TIMESTAMP_PATTERN = re.compile(
 )
 
 
-def parse_libre_timestamp(value: str | None) -> datetime | None:
+def parse_libre_timestamp(value: object) -> datetime | None:
     """Parse a LibreLinkUp UTC timestamp, locale-independently.
 
     Returns ``None`` for anything that is not a well-formed timestamp, so that
     malformed API data never raises into the entity layer.
+
+    Takes ``object`` rather than ``str | None`` because the value comes straight
+    out of a JSON payload: a ``FactoryTimestamp`` that arrives as a number would
+    otherwise raise on ``.strip()``, and /llu/connections carries every shared
+    patient at once, so that one reading would take the whole account's poll
+    down with it.
     """
-    if not value:
+    if not isinstance(value, str):
         return None
 
     match = LIBRE_TIMESTAMP_PATTERN.fullmatch(value.strip())

@@ -597,6 +597,49 @@ async def test_one_unusable_measurement_does_not_hide_the_others() -> None:
     assert measurements["patient-c"]["ValueInMgPerDl"] == 110
 
 
+async def test_a_non_string_timestamp_only_costs_its_own_patient() -> None:
+    """A FactoryTimestamp that is not a string must not fail the whole poll.
+
+    It used to: .strip() on a number raised AttributeError out of the
+    measurement validation, the coordinator saw the account-wide update fail,
+    and A and C lost readings that had arrived intact in the same response.
+    """
+    api, _ = make_api(
+        payload={
+            "status": 0,
+            "data": [
+                {
+                    "patientId": "patient-a",
+                    "glucoseMeasurement": {
+                        **VALID_MEASUREMENT,
+                        "ValueInMgPerDl": 76,
+                    },
+                },
+                {
+                    "patientId": "patient-b",
+                    "glucoseMeasurement": {
+                        **VALID_MEASUREMENT,
+                        "FactoryTimestamp": 123,
+                    },
+                },
+                {
+                    "patientId": "patient-c",
+                    "glucoseMeasurement": {
+                        **VALID_MEASUREMENT,
+                        "ValueInMgPerDl": 110,
+                    },
+                },
+            ],
+        }
+    )
+
+    measurements = await api.async_get_measurements()
+
+    assert measurements["patient-b"] is None
+    assert measurements["patient-a"]["ValueInMgPerDl"] == 76
+    assert measurements["patient-c"]["ValueInMgPerDl"] == 110
+
+
 async def test_numeric_string_value_stays_accepted() -> None:
     """The entity layer already coerces these, so the API stays permissive."""
     measurement = {**VALID_MEASUREMENT, "ValueInMgPerDl": "115"}
