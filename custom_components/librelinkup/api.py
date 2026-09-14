@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import hashlib
 
-from aiohttp import ClientResponseError, ClientSession
+from aiohttp import ClientResponse, ClientResponseError, ClientSession, ContentTypeError
 
 
 DEFAULT_BASE_URL = "https://api.libreview.io"
@@ -34,6 +34,75 @@ class LibreLinkUpAuthenticationError(Exception):
 
 class LibreLinkUpRegionError(Exception):
     pass
+
+
+class LibreLinkUpResponseError(Exception):
+    """The API replied with something that cannot be interpreted safely.
+
+    Messages are deliberately static: the raw payload, the token, the account
+    ID and the patient ID must never reach a log file or an issue report.
+    """
+
+
+class LibreLinkUpMeasurementError(LibreLinkUpResponseError):
+    """The API replied successfully but carried no usable measurement."""
+
+
+# Fields the integration actually consumes. isLow/isHigh are intentionally not
+# required: the binary sensors coerce them with bool(), so a missing flag
+# degrades to "off" instead of discarding an otherwise valid glucose reading.
+REQUIRED_MEASUREMENT_FIELDS = (
+    "ValueInMgPerDl",
+    "FactoryTimestamp",
+    "TrendArrow",
+)
+
+
+async def _async_read_json(response: ClientResponse) -> object:
+    """Decode a JSON body, translating decoding failures into safe errors.
+
+    Both branches use "from None" on purpose. ContentTypeError is a
+    ClientResponseError whose repr() contains the Authorization header, so
+    chaining it would leak the bearer token into any logged traceback.
+    """
+    try:
+        return await response.json()
+    except ContentTypeError:
+        raise LibreLinkUpResponseError(
+            "LibreLinkUp API returned an unexpected content type"
+        ) from None
+    except ValueError:
+        raise LibreLinkUpResponseError(
+            "LibreLinkUp API returned invalid JSON"
+        ) from None
+
+
+def _require_dict(result: object) -> dict:
+    """Reject anything that is not a JSON object (including an empty body)."""
+    if not isinstance(result, dict):
+        raise LibreLinkUpResponseError(
+            "LibreLinkUp API returned malformed data"
+        )
+
+    return result
+
+
+def _validate_envelope(result: object) -> dict:
+    """Validate the response envelope of the authenticated data endpoints.
+
+    Login is deliberately not routed through here: a non-success status there
+    means the credentials were rejected, which stays an authentication error.
+    """
+    result = _require_dict(result)
+
+    status = result.get("status")
+
+    if status is not None and status != 0:
+        raise LibreLinkUpResponseError(
+            "LibreLinkUp API returned a non-success status"
+        )
+
+    return result
 
 
 class LibreLinkUpApi:
@@ -68,7 +137,7 @@ class LibreLinkUpApi:
                     )
 
                 response.raise_for_status()
-                result = await response.json()
+                result = _require_dict(await _async_read_json(response))
 
             if result.get("status") != 0:
                 raise LibreLinkUpAuthenticationError(
@@ -139,10 +208,14 @@ class LibreLinkUpApi:
                     timeout=20,
                 ) as response:
                     response.raise_for_status()
-                    return await response.json()
+                    # Decoding happens inside the try, but _async_read_json
+                    # converts its failures first, so a ContentTypeError can
+                    # never be mistaken for an HTTP-level error below.
+                    result = await _async_read_json(response)
 
             except ClientResponseError as err:
                 if err.status not in (401, 403):
+                    # 429 and 5xx keep their status for later backoff handling.
                     raise
 
                 if attempt == 1:
@@ -151,6 +224,9 @@ class LibreLinkUpApi:
                     ) from err
 
                 await self.async_login()
+                continue
+
+            return _validate_envelope(result)
 
         raise RuntimeError(
             "LibreLinkUp request failed after re-authentication"
@@ -160,7 +236,30 @@ class LibreLinkUpApi:
         result = await self._async_get_authenticated(
             "/llu/connections"
         )
-        return result.get("data") or []
+
+        connections = result.get("data")
+
+        if not isinstance(connections, list):
+            raise LibreLinkUpResponseError(
+                "LibreLinkUp API returned malformed data"
+            )
+
+        # Fail closed: a connection we cannot identify is never silently
+        # skipped, because the user would then pick from an incomplete list.
+        for connection in connections:
+            if not isinstance(connection, dict):
+                raise LibreLinkUpResponseError(
+                    "LibreLinkUp API returned malformed data"
+                )
+
+            patient_id = connection.get("patientId")
+
+            if not isinstance(patient_id, str) or not patient_id.strip():
+                raise LibreLinkUpResponseError(
+                    "LibreLinkUp connection is missing a patient identifier"
+                )
+
+        return connections
 
     async def async_get_glucose_measurement(
         self,
@@ -170,7 +269,45 @@ class LibreLinkUpApi:
             f"/llu/connections/{patient_id}/graph"
         )
 
-        data = result.get("data") or {}
-        connection = data.get("connection") or {}
+        data = result.get("data")
 
-        return connection.get("glucoseMeasurement") or {}
+        if not isinstance(data, dict):
+            raise LibreLinkUpResponseError(
+                "LibreLinkUp API returned malformed data"
+            )
+
+        connection = data.get("connection")
+
+        if not isinstance(connection, dict):
+            raise LibreLinkUpResponseError(
+                "LibreLinkUp API returned malformed data"
+            )
+
+        measurement = connection.get("glucoseMeasurement")
+
+        if measurement is None or measurement == {}:
+            raise LibreLinkUpMeasurementError(
+                "LibreLinkUp returned no glucose measurement"
+            )
+
+        if not isinstance(measurement, dict):
+            raise LibreLinkUpResponseError(
+                "LibreLinkUp API returned malformed data"
+            )
+
+        for field in REQUIRED_MEASUREMENT_FIELDS:
+            value = measurement.get(field)
+
+            # "is None" rather than a falsy check: TrendArrow 0 ("not
+            # determined") and a glucose value of 0 are legitimate readings.
+            if value is None:
+                raise LibreLinkUpMeasurementError(
+                    "LibreLinkUp glucose measurement is missing required fields"
+                )
+
+            if isinstance(value, (list, dict)):
+                raise LibreLinkUpResponseError(
+                    "LibreLinkUp API returned malformed data"
+                )
+
+        return measurement
