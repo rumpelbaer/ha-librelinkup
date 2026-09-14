@@ -76,6 +76,42 @@ blueprint:
           unit_of_measurement: mmol/L
           mode: box
 
+    very_low_color:
+      name: Very low color
+      default: [255, 0, 0]
+      selector:
+        color_rgb:
+
+    low_color:
+      name: Low color
+      default: [255, 100, 0]
+      selector:
+        color_rgb:
+
+    normal_color:
+      name: Normal color
+      default: [0, 255, 0]
+      selector:
+        color_rgb:
+
+    high_color:
+      name: High color
+      default: [255, 200, 0]
+      selector:
+        color_rgb:
+
+    very_high_color:
+      name: Very high color
+      default: [180, 0, 255]
+      selector:
+        color_rgb:
+
+    stale_color:
+      name: Stale or unavailable color
+      default: [0, 80, 255]
+      selector:
+        color_rgb:
+
     brightness:
       name: Brightness
       description: Brightness of the glucose light.
@@ -104,6 +140,12 @@ variables:
   high: !input high_threshold
   very_high: !input very_high_threshold
   light_brightness: !input brightness
+  color_very_low: !input very_low_color
+  color_low: !input low_color
+  color_normal: !input normal_color
+  color_high: !input high_color
+  color_very_high: !input very_high_color
+  color_stale: !input stale_color
 
 action:
   - choose:
@@ -116,7 +158,7 @@ action:
           - service: light.turn_on
             target: !input target_light
             data:
-              rgb_color: [0, 80, 255]
+              rgb_color: "{{ color_stale }}"
               brightness: "{{ light_brightness }}"
 
       - conditions:
@@ -127,7 +169,7 @@ action:
           - service: light.turn_on
             target: !input target_light
             data:
-              rgb_color: [255, 0, 0]
+              rgb_color: "{{ color_very_low }}"
               brightness: "{{ light_brightness }}"
 
       - conditions:
@@ -138,7 +180,7 @@ action:
           - service: light.turn_on
             target: !input target_light
             data:
-              rgb_color: [255, 100, 0]
+              rgb_color: "{{ color_low }}"
               brightness: "{{ light_brightness }}"
 
       - conditions:
@@ -149,7 +191,7 @@ action:
           - service: light.turn_on
             target: !input target_light
             data:
-              rgb_color: [0, 255, 0]
+              rgb_color: "{{ color_normal }}"
               brightness: "{{ light_brightness }}"
 
       - conditions:
@@ -160,12 +202,12 @@ action:
           - service: light.turn_on
             target: !input target_light
             data:
-              rgb_color: [255, 200, 0]
+              rgb_color: "{{ color_high }}"
               brightness: "{{ light_brightness }}"
 
     default:
       - service: light.turn_on
         target: !input target_light
         data:
-          rgb_color: [180, 0, 255]
+          rgb_color: "{{ color_very_high }}"
           brightness: "{{ light_brightness }}"
