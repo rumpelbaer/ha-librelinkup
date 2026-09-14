@@ -5,7 +5,20 @@ import hashlib
 from aiohttp import ClientResponseError, ClientSession
 
 
-BASE_URL = "https://api-de.libreview.io"
+DEFAULT_BASE_URL = "https://api.libreview.io"
+
+REGION_URLS = {
+    "us": "https://api.libreview.io",
+    "eu": "https://api-eu.libreview.io",
+    "eu2": "https://api-eu2.libreview.io",
+    "de": "https://api-de.libreview.io",
+    "fr": "https://api-fr.libreview.io",
+    "jp": "https://api-jp.libreview.io",
+    "ap": "https://api-ap.libreview.io",
+    "au": "https://api-au.libreview.io",
+    "ae": "https://api-ae.libreview.io",
+    "ca": "https://api-ca.libreview.io",
+}
 
 HEADERS = {
     "product": "llu.android",
@@ -19,6 +32,10 @@ class LibreLinkUpAuthenticationError(Exception):
     pass
 
 
+class LibreLinkUpRegionError(Exception):
+    pass
+
+
 class LibreLinkUpApi:
     def __init__(self, session: ClientSession, email: str, password: str) -> None:
         self._session = session
@@ -26,36 +43,74 @@ class LibreLinkUpApi:
         self._password = password
         self._token: str | None = None
         self._account_id: str | None = None
+        self._base_url = DEFAULT_BASE_URL
+        self._region: str | None = None
+
+    @property
+    def region(self) -> str | None:
+        return self._region
+
+    @property
+    def base_url(self) -> str:
+        return self._base_url
 
     async def async_login(self) -> None:
-        async with self._session.post(
-            f"{BASE_URL}/llu/auth/login",
-            headers=HEADERS,
-            json={"email": self._email, "password": self._password},
-            timeout=20,
-        ) as response:
-            response.raise_for_status()
-            result = await response.json()
+        for _ in range(2):
+            async with self._session.post(
+                f"{self._base_url}/llu/auth/login",
+                headers=HEADERS,
+                json={"email": self._email, "password": self._password},
+                timeout=20,
+            ) as response:
+                response.raise_for_status()
+                result = await response.json()
 
-        if result.get("status") != 0:
-            raise LibreLinkUpAuthenticationError(
-                f"LibreLinkUp login failed with status {result.get('status')}"
-            )
+            if result.get("status") != 0:
+                raise LibreLinkUpAuthenticationError(
+                    f"LibreLinkUp login failed with status {result.get('status')}"
+                )
 
-        data = result.get("data") or {}
-        user = data.get("user") or {}
-        auth = data.get("authTicket") or {}
+            data = result.get("data") or {}
 
-        user_id = user.get("id")
-        token = auth.get("token")
+            if data.get("redirect"):
+                region = str(data.get("region") or "").lower()
+                base_url = REGION_URLS.get(region)
 
-        if not user_id or not token:
-            raise LibreLinkUpAuthenticationError(
-                "LibreLinkUp login did not return user ID and token"
-            )
+                if not base_url:
+                    raise LibreLinkUpRegionError(
+                        f"Unsupported LibreLinkUp region: {region or 'unknown'}"
+                    )
 
-        self._token = token
-        self._account_id = hashlib.sha256(user_id.encode("utf-8")).hexdigest()
+                self._region = region
+                self._base_url = base_url
+                continue
+
+            user = data.get("user") or {}
+            auth = data.get("authTicket") or {}
+
+            user_id = user.get("id")
+            token = auth.get("token")
+
+            if not user_id or not token:
+                raise LibreLinkUpAuthenticationError(
+                    "LibreLinkUp login did not return user ID and token"
+                )
+
+            self._token = token
+            self._account_id = hashlib.sha256(
+                user_id.encode("utf-8")
+            ).hexdigest()
+
+            if self._region is None:
+                country = str(user.get("country") or "").lower()
+                if country in REGION_URLS:
+                    self._region = country
+
+            return
+
+        raise LibreLinkUpRegionError(
+            "LibreLinkUp region redirect could not be resolved"
+        )
 
     def _auth_headers(self) -> dict[str, str]:
         if not self._token or not self._account_id:
@@ -74,29 +129,38 @@ class LibreLinkUpApi:
         for attempt in range(2):
             try:
                 async with self._session.get(
-                    f"{BASE_URL}{path}",
+                    f"{self._base_url}{path}",
                     headers=self._auth_headers(),
                     timeout=20,
                 ) as response:
                     response.raise_for_status()
                     return await response.json()
+
             except ClientResponseError as err:
                 if err.status not in (401, 403) or attempt == 1:
                     raise
 
                 await self.async_login()
 
-        raise RuntimeError("LibreLinkUp request failed after re-authentication")
+        raise RuntimeError(
+            "LibreLinkUp request failed after re-authentication"
+        )
 
     async def async_get_connections(self) -> list[dict]:
-        result = await self._async_get_authenticated("/llu/connections")
+        result = await self._async_get_authenticated(
+            "/llu/connections"
+        )
         return result.get("data") or []
 
-    async def async_get_glucose_measurement(self, patient_id: str) -> dict:
+    async def async_get_glucose_measurement(
+        self,
+        patient_id: str,
+    ) -> dict:
         result = await self._async_get_authenticated(
             f"/llu/connections/{patient_id}/graph"
         )
 
         data = result.get("data") or {}
         connection = data.get("connection") or {}
+
         return connection.get("glucoseMeasurement") or {}

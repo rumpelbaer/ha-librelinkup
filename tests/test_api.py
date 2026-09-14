@@ -95,3 +95,71 @@ class TestLibreLinkUpApi(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+class RegionRedirectResponse:
+    def __init__(self, data: dict) -> None:
+        self._data = data
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
+
+    def raise_for_status(self) -> None:
+        pass
+
+    async def json(self) -> dict:
+        return self._data
+
+
+class RegionRedirectSession:
+    def __init__(self) -> None:
+        self.urls = []
+
+    def post(self, url, *args, **kwargs):
+        self.urls.append(url)
+
+        if len(self.urls) == 1:
+            return RegionRedirectResponse(
+                {
+                    "status": 0,
+                    "data": {
+                        "redirect": True,
+                        "region": "eu",
+                    },
+                }
+            )
+
+        return RegionRedirectResponse(
+            {
+                "status": 0,
+                "data": {
+                    "user": {
+                        "id": "test-user-id",
+                        "country": "NL",
+                    },
+                    "authTicket": {
+                        "token": "test-token",
+                    },
+                },
+            }
+        )
+
+
+class TestLibreLinkUpRegionRedirect(unittest.IsolatedAsyncioTestCase):
+    async def test_follows_region_redirect(self) -> None:
+        session = RegionRedirectSession()
+        api = LibreLinkUpApi(session, "test@example.com", "password")
+
+        await api.async_login()
+
+        self.assertEqual(api.region, "eu")
+        self.assertEqual(api.base_url, "https://api-eu.libreview.io")
+        self.assertEqual(
+            session.urls,
+            [
+                "https://api.libreview.io/llu/auth/login",
+                "https://api-eu.libreview.io/llu/auth/login",
+            ],
+        )

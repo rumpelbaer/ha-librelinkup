@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+
 import voluptuous as vol
 from aiohttp import ClientResponseError
 
@@ -112,10 +114,14 @@ class LibreLinkUpConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         connection: dict,
         patient_name: str | None = None,
     ) -> FlowResult:
-        await self.async_set_unique_id(email)
-        self._abort_if_unique_id_configured()
-
         patient_id = connection["patientId"]
+
+        unique_id = hashlib.sha256(
+            f"{email}:{patient_id}".encode("utf-8")
+        ).hexdigest()
+
+        await self.async_set_unique_id(unique_id)
+        self._abort_if_unique_id_configured()
         name = patient_name or self._connection_name(connection)
 
         return self.async_create_entry(
