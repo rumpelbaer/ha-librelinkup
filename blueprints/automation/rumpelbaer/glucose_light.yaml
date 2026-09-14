@@ -1,28 +1,46 @@
 blueprint:
   name: LibreLinkUp Glucose Light
   description: >
-    Visualize LibreLinkUp glucose values with an RGB light.
-    Glucose thresholds, colors, brightness and activation conditions are configurable.
+    Visual orientation only: colours an RGB light according to a LibreLinkUp
+    glucose sensor. Thresholds, colours, brightness and activation conditions
+    are configurable.
+
+
+    Not a medical device. Never use the colour of a lamp for treatment,
+    dosing or any other medical decision, and always check the glucose value
+    and the sensor itself in the LibreLinkUp app.
+
+
+    A glucose light makes health information visible to everyone in the room,
+    including guests. Choose the location accordingly.
+
+
+    Thresholds are entered in mmol/L. The automation reads the unit of the
+    glucose entity and converts a mg/dL reading before comparing, so switching
+    the entity's display unit does not change how it behaves. If the unit is
+    neither mmol/L nor mg/dL, the light shows the stale colour instead of
+    guessing a glucose range.
   domain: automation
 
   input:
     glucose_sensor:
       name: Glucose sensor
-      description: LibreLinkUp glucose entity in mmol/L.
+      description: LibreLinkUp glucose entity. Both mmol/L and mg/dL work.
       selector:
         entity:
           domain: sensor
+          device_class: blood_glucose_concentration
 
     stale_sensor:
       name: Data stale sensor
-      description: LibreLinkUp Data Stale binary sensor.
+      description: LibreLinkUp Data Stale binary sensor of the same person.
       selector:
         entity:
           domain: binary_sensor
 
     target_light:
       name: Target light
-      description: RGB-capable light used to visualize the glucose state.
+      description: RGB-capable, dimmable light used to visualize the glucose state.
       selector:
         target:
           entity:
@@ -107,7 +125,11 @@ blueprint:
         color_rgb:
 
     stale_color:
-      name: Stale or unavailable color
+      name: Stale, unknown or unusable color
+      description: >
+        Used when the reading is stale or unavailable, and whenever the glucose
+        value cannot be classified - for example because the entity reports an
+        unexpected unit. Never a glucose range.
       default: [0, 80, 255]
       selector:
         color_rgb:
@@ -148,7 +170,8 @@ blueprint:
     active_end_time:
       name: Active until
       description: >
-        End of the active time window. Overnight windows such as 20:00 to 07:00 are supported.
+        End of the active time window. Overnight windows such as 20:00 to 07:00
+        are supported. Setting both times to the same value means all day.
       default: "23:00:00"
       selector:
         time:
@@ -168,7 +191,8 @@ blueprint:
     inactive_behavior:
       name: Behavior while inactive
       description: >
-        Turn the light off when activation conditions are not met, or leave its current state unchanged.
+        Turn the light off when activation conditions are not met, or leave its
+        current state unchanged.
       default: turn_off
       selector:
         select:
@@ -221,6 +245,18 @@ variables:
   persons: !input presence_entities
   inactive_action: !input inactive_behavior
 
+  # Home Assistant lets the user pick the display unit of a blood glucose
+  # entity, so the state is not necessarily in mmol/L. -1 marks a state that is
+  # not a number at all (unknown, unavailable, empty).
+  glucose_unit: "{{ state_attr(glucose_entity, 'unit_of_measurement') }}"
+  glucose_raw: "{{ states(glucose_entity) | float(-1) }}"
+  glucose_usable: >-
+    {{ glucose_raw >= 0 and glucose_unit in ['mmol/L', 'mg/dL'] }}
+  # Thresholds are mmol/L, so everything is compared in mmol/L. 0 when the
+  # reading is unusable; glucose_usable is what decides, never this value.
+  glucose_mmol: >-
+    {{ 0 if not glucose_usable else (glucose_raw / 18.0182 if glucose_unit == 'mg/dL' else glucose_raw) }}
+
 action:
   - choose:
       - conditions:
@@ -228,7 +264,9 @@ action:
             value_template: >
               {% set current = now().strftime('%H:%M:%S') %}
 
-              {% if active_start <= active_end %}
+              {% if active_start == active_end %}
+                {% set time_active = true %}
+              {% elif active_start < active_end %}
                 {% set time_active = active_start <= current < active_end %}
               {% else %}
                 {% set time_active = current >= active_start or current < active_end %}
@@ -267,9 +305,8 @@ action:
       - choose:
           - conditions:
               - condition: template
-                value_template: >
-                  {{ is_state(stale_entity, 'on')
-                     or states(glucose_entity) in ['unknown', 'unavailable'] }}
+                value_template: >-
+                  {{ is_state(stale_entity, 'on') or not glucose_usable }}
             sequence:
               - service: light.turn_on
                 target: !input target_light
@@ -279,8 +316,8 @@ action:
 
           - conditions:
               - condition: template
-                value_template: >
-                  {{ states(glucose_entity) | float(999) < very_low | float }}
+                value_template: >-
+                  {{ glucose_mmol | float < very_low | float }}
             sequence:
               - service: light.turn_on
                 target: !input target_light
@@ -290,8 +327,8 @@ action:
 
           - conditions:
               - condition: template
-                value_template: >
-                  {{ states(glucose_entity) | float(999) < low | float }}
+                value_template: >-
+                  {{ glucose_mmol | float < low | float }}
             sequence:
               - service: light.turn_on
                 target: !input target_light
@@ -301,8 +338,8 @@ action:
 
           - conditions:
               - condition: template
-                value_template: >
-                  {{ states(glucose_entity) | float(999) <= high | float }}
+                value_template: >-
+                  {{ glucose_mmol | float <= high | float }}
             sequence:
               - service: light.turn_on
                 target: !input target_light
@@ -312,8 +349,8 @@ action:
 
           - conditions:
               - condition: template
-                value_template: >
-                  {{ states(glucose_entity) | float(999) <= very_high | float }}
+                value_template: >-
+                  {{ glucose_mmol | float <= very_high | float }}
             sequence:
               - service: light.turn_on
                 target: !input target_light
