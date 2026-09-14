@@ -20,6 +20,7 @@ class LibreLinkUpConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     def __init__(self) -> None:
         self._pending_credentials: dict | None = None
         self._connections: dict[str, str] = {}
+        self._reauth_entry = None
 
     async def async_step_user(self, user_input: dict | None = None) -> FlowResult:
         errors: dict[str, str] = {}
@@ -73,6 +74,75 @@ class LibreLinkUpConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         return self.async_show_form(
             step_id="user",
             data_schema=schema,
+            errors=errors,
+        )
+
+    async def async_step_reauth(
+        self,
+        entry_data: dict,
+    ) -> FlowResult:
+        self._reauth_entry = self.hass.config_entries.async_get_entry(
+            self.context["entry_id"]
+        )
+        return await self.async_step_reauth_confirm()
+
+    async def async_step_reauth_confirm(
+        self,
+        user_input: dict | None = None,
+    ) -> FlowResult:
+        errors: dict[str, str] = {}
+
+        assert self._reauth_entry is not None
+
+        if user_input is not None:
+            password = user_input[CONF_PASSWORD]
+            email = self._reauth_entry.data[CONF_EMAIL]
+
+            api = LibreLinkUpApi(
+                async_get_clientsession(self.hass),
+                email,
+                password,
+            )
+
+            try:
+                await api.async_login()
+                connections = await api.async_get_connections()
+            except LibreLinkUpAuthenticationError:
+                errors["base"] = "invalid_auth"
+            except Exception:
+                errors["base"] = "cannot_connect"
+            else:
+                patient_id = self._reauth_entry.data.get(CONF_PATIENT_ID)
+
+                if patient_id and not any(
+                    connection.get("patientId") == patient_id
+                    for connection in connections
+                ):
+                    errors["base"] = "no_connections"
+                else:
+                    new_data = {
+                        **self._reauth_entry.data,
+                        CONF_PASSWORD: password,
+                    }
+
+                    self.hass.config_entries.async_update_entry(
+                        self._reauth_entry,
+                        data=new_data,
+                    )
+
+                    await self.hass.config_entries.async_reload(
+                        self._reauth_entry.entry_id
+                    )
+
+                    return self.async_abort(reason="reauth_successful")
+
+        return self.async_show_form(
+            step_id="reauth_confirm",
+            data_schema=vol.Schema(
+                {
+                    vol.Required(CONF_PASSWORD): str,
+                }
+            ),
             errors=errors,
         )
 

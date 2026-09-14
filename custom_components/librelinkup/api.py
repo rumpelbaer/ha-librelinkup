@@ -62,6 +62,11 @@ class LibreLinkUpApi:
                 json={"email": self._email, "password": self._password},
                 timeout=20,
             ) as response:
+                if response.status in (401, 403):
+                    raise LibreLinkUpAuthenticationError(
+                        "LibreLinkUp rejected the supplied credentials"
+                    )
+
                 response.raise_for_status()
                 result = await response.json()
 
@@ -137,8 +142,13 @@ class LibreLinkUpApi:
                     return await response.json()
 
             except ClientResponseError as err:
-                if err.status not in (401, 403) or attempt == 1:
+                if err.status not in (401, 403):
                     raise
+
+                if attempt == 1:
+                    raise LibreLinkUpAuthenticationError(
+                        "LibreLinkUp authentication failed after re-authentication"
+                    ) from err
 
                 await self.async_login()
 

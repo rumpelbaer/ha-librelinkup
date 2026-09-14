@@ -22,5 +22,8 @@
       "cannot_connect": "Verbindung zu LibreLinkUp konnte nicht hergestellt werden.",
       "no_connections": "Für dieses LibreLinkUp-Konto wurden keine Verbindungen gefunden."
     }
+  },
+  "abort": {
+    "reauth_successful": "Die erneute Authentifizierung war erfolgreich."
   }
 }

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import unittest
+from unittest.mock import AsyncMock
 from pathlib import Path
 
 from aiohttp import ClientResponseError
@@ -20,6 +21,7 @@ assert spec.loader is not None
 spec.loader.exec_module(api_module)
 
 LibreLinkUpApi = api_module.LibreLinkUpApi
+LibreLinkUpAuthenticationError = api_module.LibreLinkUpAuthenticationError
 
 
 class FakeResponse:
@@ -99,6 +101,7 @@ if __name__ == "__main__":
 class RegionRedirectResponse:
     def __init__(self, data: dict) -> None:
         self._data = data
+        self.status = 200
 
     async def __aenter__(self):
         return self
@@ -163,3 +166,54 @@ class TestLibreLinkUpRegionRedirect(unittest.IsolatedAsyncioTestCase):
                 "https://api-eu.libreview.io/llu/auth/login",
             ],
         )
+
+class TestLibreLinkUpAuthenticationFailure(unittest.IsolatedAsyncioTestCase):
+    async def test_raises_authentication_error_after_failed_reauthentication(self) -> None:
+        class Response:
+            def __init__(self, status, payload=None):
+                self.status = status
+                self._payload = payload or {}
+
+            async def __aenter__(self):
+                if self.status >= 400:
+                    from aiohttp import ClientResponseError, RequestInfo
+                    from multidict import CIMultiDict, CIMultiDictProxy
+
+                    raise ClientResponseError(
+                        RequestInfo(
+                            url="https://api.libreview.io/test",
+                            method="GET",
+                            headers=CIMultiDictProxy(CIMultiDict()),
+                            real_url="https://api.libreview.io/test",
+                        ),
+                        (),
+                        status=self.status,
+                    )
+                return self
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return False
+
+            def raise_for_status(self):
+                return None
+
+            async def json(self):
+                return self._payload
+
+        class Session:
+            def __init__(self):
+                self.get_calls = 0
+
+            def get(self, *args, **kwargs):
+                self.get_calls += 1
+                return Response(401)
+
+        api = LibreLinkUpApi(Session(), "test@example.com", "password")
+        api._token = "expired-token"
+        api._account_id = "account-id"
+        api.async_login = AsyncMock()
+
+        with self.assertRaises(LibreLinkUpAuthenticationError):
+            await api._async_get_authenticated("/llu/connections")
+
+        api.async_login.assert_awaited_once()
