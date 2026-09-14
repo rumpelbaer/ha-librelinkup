@@ -15,6 +15,10 @@ HEADERS = {
 }
 
 
+class LibreLinkUpAuthenticationError(Exception):
+    pass
+
+
 class LibreLinkUpApi:
     def __init__(self, session: ClientSession, email: str, password: str) -> None:
         self._session = session
@@ -33,6 +37,11 @@ class LibreLinkUpApi:
             response.raise_for_status()
             result = await response.json()
 
+        if result.get("status") != 0:
+            raise LibreLinkUpAuthenticationError(
+                f"LibreLinkUp login failed with status {result.get('status')}"
+            )
+
         data = result.get("data") or {}
         user = data.get("user") or {}
         auth = data.get("authTicket") or {}
@@ -41,7 +50,9 @@ class LibreLinkUpApi:
         token = auth.get("token")
 
         if not user_id or not token:
-            raise RuntimeError("LibreLinkUp login did not return user ID and token")
+            raise LibreLinkUpAuthenticationError(
+                "LibreLinkUp login did not return user ID and token"
+            )
 
         self._token = token
         self._account_id = hashlib.sha256(user_id.encode("utf-8")).hexdigest()

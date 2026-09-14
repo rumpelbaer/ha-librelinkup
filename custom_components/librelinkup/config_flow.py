@@ -8,7 +8,7 @@ from homeassistant.const import CONF_EMAIL, CONF_PASSWORD
 from homeassistant.data_entry_flow import FlowResult
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
-from .api import LibreLinkUpApi
+from .api import LibreLinkUpApi, LibreLinkUpAuthenticationError
 from .const import DOMAIN
 
 
@@ -31,8 +31,10 @@ class LibreLinkUpConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             try:
                 await api.async_login()
                 connections = await api.async_get_connections()
-            except ClientResponseError:
+            except LibreLinkUpAuthenticationError:
                 errors["base"] = "invalid_auth"
+            except ClientResponseError:
+                errors["base"] = "cannot_connect"
             except Exception:
                 errors["base"] = "cannot_connect"
             else:

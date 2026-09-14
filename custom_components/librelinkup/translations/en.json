@@ -1,0 +1,19 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "LibreLinkUp",
+        "description": "Enter the credentials of your LibreLinkUp account. For Home Assistant, using a separate LibreLinkUp account created specifically for this integration is recommended.",
+        "data": {
+          "email": "Email",
+          "password": "Password"
+        }
+      }
+    },
+    "error": {
+      "invalid_auth": "Invalid email address or password.",
+      "cannot_connect": "Could not connect to LibreLinkUp.",
+      "no_connections": "No LibreLinkUp connections were found for this account."
+    }
+  }
+}
