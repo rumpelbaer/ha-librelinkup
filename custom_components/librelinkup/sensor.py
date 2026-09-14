@@ -11,13 +11,29 @@ from .const import DOMAIN
 from .coordinator import LibreLinkUpCoordinator
 
 
+TREND_MAP = {
+    1: ("falling_rapidly", "↓↓"),
+    2: ("falling", "↓"),
+    3: ("falling_slowly", "↘"),
+    4: ("stable", "→"),
+    5: ("rising_slowly", "↗"),
+    6: ("rising", "↑"),
+    7: ("rising_rapidly", "↑↑"),
+}
+
+
 async def async_setup_entry(
     hass: HomeAssistant,
     entry: ConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ) -> None:
     coordinator: LibreLinkUpCoordinator = hass.data[DOMAIN][entry.entry_id]
-    async_add_entities([LibreLinkUpGlucoseSensor(coordinator, entry)])
+    async_add_entities(
+        [
+            LibreLinkUpGlucoseSensor(coordinator, entry),
+            LibreLinkUpTrendSensor(coordinator, entry),
+        ]
+    )
 
 
 class LibreLinkUpGlucoseSensor(
@@ -54,4 +70,34 @@ class LibreLinkUpGlucoseSensor(
             "measurement_color": data.get("MeasurementColor"),
             "is_high": data.get("isHigh"),
             "is_low": data.get("isLow"),
+        }
+
+
+class LibreLinkUpTrendSensor(
+    CoordinatorEntity[LibreLinkUpCoordinator],
+    SensorEntity,
+):
+    _attr_name = "LibreLinkUp Trend"
+
+    def __init__(
+        self,
+        coordinator: LibreLinkUpCoordinator,
+        entry: ConfigEntry,
+    ) -> None:
+        super().__init__(coordinator)
+        self._attr_unique_id = f"{entry.entry_id}_trend"
+
+    @property
+    def native_value(self) -> str | None:
+        code = self.coordinator.data.get("TrendArrow")
+        trend = TREND_MAP.get(code)
+        return trend[0] if trend else None
+
+    @property
+    def extra_state_attributes(self) -> dict:
+        code = self.coordinator.data.get("TrendArrow")
+        trend = TREND_MAP.get(code)
+        return {
+            "trend_code": code,
+            "trend_arrow": trend[1] if trend else None,
         }
