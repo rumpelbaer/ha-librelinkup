@@ -1,2 +1,2 @@
 DOMAIN = "librelinkup"
-PLATFORMS = ["sensor"]
+PLATFORMS = ["sensor", "binary_sensor"]
