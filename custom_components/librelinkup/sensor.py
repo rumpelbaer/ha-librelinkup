@@ -4,6 +4,7 @@ from homeassistant.components.sensor import SensorDeviceClass, SensorEntity, Sen
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import UnitOfBloodGlucoseConcentration
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
@@ -51,6 +52,7 @@ class LibreLinkUpGlucoseSensor(
     ) -> None:
         super().__init__(coordinator)
         self._attr_unique_id = f"{entry.entry_id}_glucose"
+        self._attr_device_info = DeviceInfo(identifiers={(DOMAIN, entry.entry_id)}, name="LibreLinkUp", manufacturer="Abbott", model="FreeStyle LibreLinkUp")
 
     @property
     def native_value(self) -> float | None:
@@ -85,6 +87,7 @@ class LibreLinkUpTrendSensor(
     ) -> None:
         super().__init__(coordinator)
         self._attr_unique_id = f"{entry.entry_id}_trend"
+        self._attr_device_info = DeviceInfo(identifiers={(DOMAIN, entry.entry_id)}, name="LibreLinkUp", manufacturer="Abbott", model="FreeStyle LibreLinkUp")
 
     @property
     def native_value(self) -> str | None:
