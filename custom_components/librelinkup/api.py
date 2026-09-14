@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import hashlib
 
-from aiohttp import ClientSession
+from aiohttp import ClientResponseError, ClientSession
 
 
 BASE_URL = "https://api-de.libreview.io"
@@ -67,25 +67,35 @@ class LibreLinkUpApi:
             "Account-Id": self._account_id,
         }
 
-    async def async_get_connections(self) -> list[dict]:
-        async with self._session.get(
-            f"{BASE_URL}/llu/connections",
-            headers=self._auth_headers(),
-            timeout=20,
-        ) as response:
-            response.raise_for_status()
-            result = await response.json()
+    async def _async_get_authenticated(self, path: str) -> dict:
+        if not self._token or not self._account_id:
+            await self.async_login()
 
+        for attempt in range(2):
+            try:
+                async with self._session.get(
+                    f"{BASE_URL}{path}",
+                    headers=self._auth_headers(),
+                    timeout=20,
+                ) as response:
+                    response.raise_for_status()
+                    return await response.json()
+            except ClientResponseError as err:
+                if err.status not in (401, 403) or attempt == 1:
+                    raise
+
+                await self.async_login()
+
+        raise RuntimeError("LibreLinkUp request failed after re-authentication")
+
+    async def async_get_connections(self) -> list[dict]:
+        result = await self._async_get_authenticated("/llu/connections")
         return result.get("data") or []
 
     async def async_get_glucose_measurement(self, patient_id: str) -> dict:
-        async with self._session.get(
-            f"{BASE_URL}/llu/connections/{patient_id}/graph",
-            headers=self._auth_headers(),
-            timeout=20,
-        ) as response:
-            response.raise_for_status()
-            result = await response.json()
+        result = await self._async_get_authenticated(
+            f"/llu/connections/{patient_id}/graph"
+        )
 
         data = result.get("data") or {}
         connection = data.get("connection") or {}
