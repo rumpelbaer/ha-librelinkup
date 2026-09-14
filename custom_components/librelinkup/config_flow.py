@@ -19,6 +19,7 @@ from homeassistant.helpers.selector import (
     TextSelectorType,
 )
 
+from . import account_key
 from .api import (
     LibreLinkUpAccountStateError,
     LibreLinkUpApi,
@@ -83,7 +84,9 @@ class LibreLinkUpConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         errors: dict[str, str] = {}
 
         if user_input is not None:
-            email = user_input[CONF_EMAIL].strip().lower()
+            # Stored normalized, through the same function that later decides
+            # which entries share an account.
+            email = account_key(user_input[CONF_EMAIL])
             password = user_input[CONF_PASSWORD]
 
             connections, error = await self._async_load_connections(email, password)
@@ -224,6 +227,25 @@ class LibreLinkUpConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         return connections, None
 
     @callback
+    def _account_entries(self, email: str) -> list[ConfigEntry]:
+        """Every config entry that belongs to this LibreLinkUp account.
+
+        Account identity is decided by account_key and nowhere else, so the
+        flow cannot drift apart from the runtime about which entries share a
+        client -- the runtime keys hass.data by exactly this value.
+        """
+        target = account_key(email)
+
+        return [
+            entry
+            for entry in self.hass.config_entries.async_entries(DOMAIN)
+            # ".get" rather than account_key(entry): an entry that somehow
+            # carries no address at all is skipped, as it was before, instead
+            # of failing the flow of an unrelated account.
+            if account_key(entry.data.get(CONF_EMAIL, "")) == target
+        ]
+
+    @callback
     def _async_sync_account_password(self, email: str, password: str) -> None:
         """Give every entry of this account the password just verified.
 
@@ -232,10 +254,7 @@ class LibreLinkUpConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         after a restart would decide which password the account runs on, and a
         stale one would keep being offered to Abbott.
         """
-        for other in self.hass.config_entries.async_entries(DOMAIN):
-            if other.data.get(CONF_EMAIL) != email:
-                continue
-
+        for other in self._account_entries(email):
             if other.data.get(CONF_PASSWORD) == password:
                 continue
 
@@ -255,22 +274,16 @@ class LibreLinkUpConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         it is disabled or was never loaded, a sibling repairs the account instead
         of the flow failing.
         """
-        candidates: list[ConfigEntry] = []
-
-        if preferred is not None:
-            candidates.append(preferred)
-
-        candidates.extend(
-            sorted(
-                self.hass.config_entries.async_entries(DOMAIN),
-                key=lambda entry: entry.entry_id,
-            )
+        candidates = sorted(
+            self._account_entries(email),
+            key=lambda entry: entry.entry_id,
         )
 
-        for entry in candidates:
-            if entry.data.get(CONF_EMAIL) != email:
-                continue
+        if preferred is not None and preferred in candidates:
+            candidates.remove(preferred)
+            candidates.insert(0, preferred)
 
+        for entry in candidates:
             if entry.disabled_by is not None or entry.state not in RELOADABLE_STATES:
                 continue
 

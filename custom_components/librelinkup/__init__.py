@@ -43,13 +43,21 @@ class AccountRuntime:
         return frozenset(self.entries.values())
 
 
-def account_key(entry: ConfigEntry) -> str:
+def account_key(source: ConfigEntry | str) -> str:
     """Runtime-only key for an account.
 
     The normalized e-mail, never the password. This lives in hass.data and is
     never persisted or logged.
+
+    Takes an entry or a bare e-mail, because the config flow has to ask "same
+    account?" about an entry that does not exist yet -- while adding a person,
+    the address is all there is. Both forms normalize here, so there is one
+    definition of when two config entries belong to the same LibreLinkUp
+    account.
     """
-    return entry.data[CONF_EMAIL].strip().lower()
+    email = source if isinstance(source, str) else source.data[CONF_EMAIL]
+
+    return email.strip().lower()
 
 
 def _issue_id(kind: str, entry_id: str) -> str:

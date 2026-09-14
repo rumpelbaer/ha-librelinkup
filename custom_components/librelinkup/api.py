@@ -109,36 +109,31 @@ REQUIRED_MEASUREMENT_FIELDS = (
 )
 
 
-def _measurement_problem(measurement: object) -> str | None:
-    """Return why a glucoseMeasurement is unusable, or None if it is fine.
+def _is_usable_measurement(measurement: object) -> bool:
+    """Whether a glucoseMeasurement can be served as a reading.
 
-    Returns a label instead of raising: /llu/connections carries every shared
-    patient at once, so one unusable reading must not invalidate the readings
-    of everybody else on the account.
+    Answers instead of raising: /llu/connections carries every shared patient
+    at once, so one unusable reading must not invalidate the readings of
+    everybody else on the account.
     """
     if not isinstance(measurement, dict) or not measurement:
-        return "missing"
+        return False
 
     for field in REQUIRED_MEASUREMENT_FIELDS:
         value = measurement.get(field)
 
         # "is None" rather than a falsy check: a glucose value of 0 would be a
-        # legitimate reading.
-        if value is None:
-            return "incomplete"
-
-        if isinstance(value, (list, dict)):
-            return "malformed"
+        # legitimate reading. A list or a dict where a scalar belongs is a
+        # changed payload shape, not a value.
+        if value is None or isinstance(value, (list, dict)):
+            return False
 
     if mg_dl_to_mmol_l(measurement.get("ValueInMgPerDl")) is None:
-        return "malformed"
+        return False
 
     # Freshness is derived from FactoryTimestamp, and a reading whose age
     # cannot be established must never be served as a current value.
-    if parse_libre_timestamp(measurement.get("FactoryTimestamp")) is None:
-        return "malformed"
-
-    return None
+    return parse_libre_timestamp(measurement.get("FactoryTimestamp")) is not None
 
 
 def _patient_id(connection: object) -> str | None:
@@ -468,7 +463,7 @@ class LibreLinkUpApi:
             measurement = connection.get("glucoseMeasurement")
 
             measurements[patient_id] = (
-                measurement if _measurement_problem(measurement) is None else None
+                measurement if _is_usable_measurement(measurement) else None
             )
 
         return measurements
