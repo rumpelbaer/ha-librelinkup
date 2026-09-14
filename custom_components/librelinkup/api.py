@@ -3,7 +3,16 @@ from __future__ import annotations
 import asyncio
 import hashlib
 
-from aiohttp import ClientResponse, ClientResponseError, ClientSession, ContentTypeError
+from aiohttp import (
+    ClientResponse,
+    ClientResponseError,
+    ClientSession,
+    ClientTimeout,
+    ContentTypeError,
+)
+
+from .const import LIBRELINKUP_APP_VERSION
+from .utils import mg_dl_to_mmol_l, parse_libre_timestamp
 
 
 DEFAULT_BASE_URL = "https://api.libreview.io"
@@ -23,18 +32,54 @@ REGION_URLS = {
 
 HEADERS = {
     "product": "llu.android",
-    "version": "4.16.0",
+    "version": LIBRELINKUP_APP_VERSION,
     "Accept": "application/json",
     "Content-Type": "application/json",
 }
 
+# One total budget per request, covering connect, response and body decoding.
+REQUEST_TIMEOUT = ClientTimeout(total=20)
+
+CONNECTIONS_PATH = "/llu/connections"
+
+# Status 0 means the login succeeded. Status 2 is the status LibreLinkUp answers
+# with when the e-mail/password pair itself is rejected, and it is the only
+# status that may send the user into a re-authentication dialog. Both were
+# verified against the live API: a correct password answers HTTP 200 with status
+# 0, a wrong one HTTP 200 with status 2.
+#
+# Every other non-zero status describes an account or client state that a new
+# password cannot fix -- the best known example is the account having to accept
+# new terms of use inside the LibreLinkUp app, which keeps failing no matter how
+# often the correct password is typed. Should this mapping ever be wrong, the
+# worst case is a missing re-authentication prompt plus a repair issue that
+# names the status, never an unresolvable reauth loop.
+LOGIN_STATUS_SUCCESS = 0
+LOGIN_STATUS_INVALID_CREDENTIALS = 2
+
 
 class LibreLinkUpAuthenticationError(Exception):
-    pass
+    """The credentials themselves were rejected.
+
+    The only error that may trigger a Home Assistant re-authentication flow.
+    """
+
+
+class LibreLinkUpAccountStateError(Exception):
+    """The login failed for a reason a new password cannot fix.
+
+    Terms of use waiting to be accepted in the LibreLinkUp app, a blocked or
+    rate-limited client, an account state change -- anything where asking the
+    user for their password again would only produce a dialog they cannot
+    satisfy. Deliberately not a LibreLinkUpAuthenticationError.
+    """
 
 
 class LibreLinkUpRegionError(Exception):
-    pass
+    """The account lives in a region this integration does not know.
+
+    Permanent: retrying cannot make an unknown region appear in the allowlist.
+    """
 
 
 class LibreLinkUpAuthorizationError(Exception):
@@ -54,13 +99,13 @@ class LibreLinkUpResponseError(Exception):
     """
 
 
-# Fields the integration actually consumes. isLow/isHigh are intentionally not
-# required: the binary sensors coerce them with bool(), so a missing flag
-# degrades to "off" instead of discarding an otherwise valid glucose reading.
+# Fields a glucoseMeasurement must carry to be usable. TrendArrow is
+# deliberately absent: the trend sensor degrades to "unknown" on its own, and
+# discarding an otherwise valid glucose reading over a missing arrow would be
+# the worse failure. isLow/isHigh are absent for the same reason.
 REQUIRED_MEASUREMENT_FIELDS = (
     "ValueInMgPerDl",
     "FactoryTimestamp",
-    "TrendArrow",
 )
 
 
@@ -77,15 +122,36 @@ def _measurement_problem(measurement: object) -> str | None:
     for field in REQUIRED_MEASUREMENT_FIELDS:
         value = measurement.get(field)
 
-        # "is None" rather than a falsy check: TrendArrow 0 ("not determined")
-        # and a glucose value of 0 are legitimate readings.
+        # "is None" rather than a falsy check: a glucose value of 0 would be a
+        # legitimate reading.
         if value is None:
             return "incomplete"
 
         if isinstance(value, (list, dict)):
             return "malformed"
 
+    if mg_dl_to_mmol_l(measurement.get("ValueInMgPerDl")) is None:
+        return "malformed"
+
+    # Freshness is derived from FactoryTimestamp, and a reading whose age
+    # cannot be established must never be served as a current value.
+    if parse_libre_timestamp(measurement.get("FactoryTimestamp")) is None:
+        return "malformed"
+
     return None
+
+
+def _patient_id(connection: object) -> str | None:
+    """Return a usable patient ID from a connection, or None."""
+    if not isinstance(connection, dict):
+        return None
+
+    patient_id = connection.get("patientId")
+
+    if not isinstance(patient_id, str) or not patient_id.strip():
+        return None
+
+    return patient_id
 
 
 async def _async_read_json(response: ClientResponse) -> object:
@@ -121,18 +187,30 @@ def _validate_envelope(result: object) -> dict:
     """Validate the response envelope of the authenticated data endpoints.
 
     Login is deliberately not routed through here: a non-success status there
-    means the credentials were rejected, which stays an authentication error.
+    describes the account, not the payload.
     """
     result = _require_dict(result)
 
     status = result.get("status")
 
-    if status is not None and status != 0:
+    if status is not None and status != LOGIN_STATUS_SUCCESS:
         raise LibreLinkUpResponseError(
             "LibreLinkUp API returned a non-success status"
         )
 
     return result
+
+
+def _connection_list(result: dict) -> list:
+    """Return the raw connection list of a /llu/connections response."""
+    connections = result.get("data")
+
+    if not isinstance(connections, list):
+        raise LibreLinkUpResponseError(
+            "LibreLinkUp API returned malformed data"
+        )
+
+    return connections
 
 
 class LibreLinkUpApi:
@@ -165,6 +243,15 @@ class LibreLinkUpApi:
     def base_url(self) -> str:
         return self._base_url
 
+    @property
+    def has_token(self) -> bool:
+        """Whether a login has produced credentials for data requests.
+
+        Exposed for diagnostics, which may report that a token exists but never
+        the token itself.
+        """
+        return bool(self._token and self._account_id)
+
     async def async_login(self, *, invalidate: str | None = None) -> None:
         """Log in, unless another request already did it while we waited.
 
@@ -187,19 +274,37 @@ class LibreLinkUpApi:
                 f"{self._base_url}/llu/auth/login",
                 headers=HEADERS,
                 json={"email": self._email, "password": self._password},
-                timeout=20,
+                timeout=REQUEST_TIMEOUT,
             ) as response:
-                if response.status in (401, 403):
+                if response.status == 401:
+                    # The credential-bearing request was answered with
+                    # "unauthenticated" -- the one HTTP status that really is a
+                    # verdict on the password.
                     raise LibreLinkUpAuthenticationError(
                         "LibreLinkUp rejected the supplied credentials"
+                    )
+
+                if response.status == 403:
+                    # "Forbidden" on a login is typically an edge or WAF block,
+                    # or a client version Abbott no longer accepts. Asking the
+                    # user for their password again would not help.
+                    raise LibreLinkUpAccountStateError(
+                        "LibreLinkUp refused the login request (HTTP 403)"
                     )
 
                 response.raise_for_status()
                 result = _require_dict(await _async_read_json(response))
 
-            if result.get("status") != 0:
-                raise LibreLinkUpAuthenticationError(
-                    f"LibreLinkUp login failed with status {result.get('status')}"
+            status = result.get("status")
+
+            if status != LOGIN_STATUS_SUCCESS:
+                if status == LOGIN_STATUS_INVALID_CREDENTIALS:
+                    raise LibreLinkUpAuthenticationError(
+                        "LibreLinkUp rejected the supplied credentials"
+                    )
+
+                raise LibreLinkUpAccountStateError(
+                    f"LibreLinkUp login failed with status {status}"
                 )
 
             data = result.get("data") or {}
@@ -224,7 +329,7 @@ class LibreLinkUpApi:
             token = auth.get("token")
 
             if not user_id or not token:
-                raise LibreLinkUpAuthenticationError(
+                raise LibreLinkUpResponseError(
                     "LibreLinkUp login did not return user ID and token"
                 )
 
@@ -244,28 +349,40 @@ class LibreLinkUpApi:
             "LibreLinkUp region redirect could not be resolved"
         )
 
-    def _auth_headers(self) -> dict[str, str]:
-        if not self._token or not self._account_id:
-            raise RuntimeError("LibreLinkUp client is not authenticated")
+    def _auth_headers(self, token: str, account_id: str) -> dict[str, str]:
+        """Headers for one request, built from a snapshot of the credentials.
 
+        Taking token and account ID as arguments instead of reading them back
+        from the instance keeps a concurrent re-login -- which briefly clears
+        both -- from turning an in-flight request into a RuntimeError. A request
+        sent with a token that has just been replaced simply gets a 401 and is
+        retried below.
+        """
         return {
             **HEADERS,
-            "Authorization": f"Bearer {self._token}",
-            "Account-Id": self._account_id,
+            "Authorization": f"Bearer {token}",
+            "Account-Id": account_id,
         }
 
     async def _async_get_authenticated(self, path: str) -> dict:
-        if not self._token or not self._account_id:
-            await self.async_login()
-
         for attempt in range(2):
+            if not self._token or not self._account_id:
+                await self.async_login(invalidate=self._token)
+
             token_used = self._token
+            account_id = self._account_id
+
+            if not token_used or not account_id:  # pragma: no cover
+                # async_login either sets both or raises; guards the invariant.
+                raise LibreLinkUpResponseError(
+                    "LibreLinkUp login did not return user ID and token"
+                )
 
             try:
                 async with self._session.get(
                     f"{self._base_url}{path}",
-                    headers=self._auth_headers(),
-                    timeout=20,
+                    headers=self._auth_headers(token_used, account_id),
+                    timeout=REQUEST_TIMEOUT,
                 ) as response:
                     response.raise_for_status()
                     # Decoding happens inside the try, but _async_read_json
@@ -293,33 +410,28 @@ class LibreLinkUpApi:
 
             return _validate_envelope(result)
 
-        raise RuntimeError(
+        raise RuntimeError(  # pragma: no cover
             "LibreLinkUp request failed after re-authentication"
         )
 
     async def async_get_connections(self) -> list[dict]:
-        result = await self._async_get_authenticated(
-            "/llu/connections"
+        """Every shared connection, validated strictly.
+
+        Used to let the user pick a person. Fail closed: a connection we cannot
+        identify is never silently skipped here, because the user would then
+        pick from an incomplete list.
+        """
+        connections = _connection_list(
+            await self._async_get_authenticated(CONNECTIONS_PATH)
         )
 
-        connections = result.get("data")
-
-        if not isinstance(connections, list):
-            raise LibreLinkUpResponseError(
-                "LibreLinkUp API returned malformed data"
-            )
-
-        # Fail closed: a connection we cannot identify is never silently
-        # skipped, because the user would then pick from an incomplete list.
         for connection in connections:
             if not isinstance(connection, dict):
                 raise LibreLinkUpResponseError(
                     "LibreLinkUp API returned malformed data"
                 )
 
-            patient_id = connection.get("patientId")
-
-            if not isinstance(patient_id, str) or not patient_id.strip():
+            if _patient_id(connection) is None:
                 raise LibreLinkUpResponseError(
                     "LibreLinkUp connection is missing a patient identifier"
                 )
@@ -333,17 +445,30 @@ class LibreLinkUpApi:
         glucoseMeasurement per connection. The former /graph call returned the
         same reading plus roughly twelve hours of history that was discarded.
 
-        A patient whose reading is missing or unusable maps to None, so callers
-        can tell "not shared any more" (absent key) apart from "shared but no
-        usable reading right now" (None).
+        Unlike async_get_connections this is deliberately tolerant: polling must
+        not lose every configured patient because some unrelated connection --
+        a pending invitation, a new field layout -- cannot be read. Connections
+        without a usable patient ID are skipped; a patient whose reading is
+        missing or unusable maps to None, so callers can tell "not shared any
+        more" (absent key) apart from "shared but no usable reading right now"
+        (None).
         """
-        connections = await self.async_get_connections()
+        connections = _connection_list(
+            await self._async_get_authenticated(CONNECTIONS_PATH)
+        )
 
-        return {
-            connection["patientId"]: (
-                connection.get("glucoseMeasurement")
-                if _measurement_problem(connection.get("glucoseMeasurement")) is None
-                else None
+        measurements: dict[str, dict | None] = {}
+
+        for connection in connections:
+            patient_id = _patient_id(connection)
+
+            if patient_id is None:
+                continue
+
+            measurement = connection.get("glucoseMeasurement")
+
+            measurements[patient_id] = (
+                measurement if _measurement_problem(measurement) is None else None
             )
-            for connection in connections
-        }
+
+        return measurements

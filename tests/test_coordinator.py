@@ -16,7 +16,10 @@ from homeassistant.util import dt as dt_util
 from multidict import CIMultiDict, CIMultiDictProxy
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
+from helpers import measurement
+
 from custom_components.librelinkup.api import (
+    LibreLinkUpAccountStateError,
     LibreLinkUpApi,
     LibreLinkUpAuthenticationError,
     LibreLinkUpAuthorizationError,
@@ -29,6 +32,7 @@ from custom_components.librelinkup.const import (
 )
 from custom_components.librelinkup.coordinator import (
     DEFAULT_UPDATE_INTERVAL,
+    MAX_MEASUREMENT_AGE,
     MAX_RATE_LIMIT_BACKOFF,
     MAX_SERVER_ERROR_BACKOFF,
     MIN_BACKOFF,
@@ -41,13 +45,6 @@ EMAIL = "user@example.com"
 PASSWORD = "super-secret-password"
 PATIENT_ID = "patient-uuid-0001"
 
-MEASUREMENT = {
-    "ValueInMgPerDl": 115,
-    "FactoryTimestamp": "9/14/2026 11:12:35 AM",
-    "TrendArrow": 3,
-    "isLow": False,
-    "isHigh": False,
-}
 
 
 def http_error(status: int, retry_after: str | None = None) -> ClientResponseError:
@@ -77,15 +74,23 @@ def http_error(status: int, retry_after: str | None = None) -> ClientResponseErr
 @pytest.fixture
 async def coordinator(hass):
     api = LibreLinkUpApi(async_get_clientsession(hass), EMAIL, PASSWORD)
-    return LibreLinkUpAccountCoordinator(hass, api)
+    coordinator = LibreLinkUpAccountCoordinator(hass, api)
+    coordinator.async_set_configured_patients([PATIENT_ID])
+    return coordinator
+
+
+def configure(coordinator, *patient_ids):
+    """Register the patients Home Assistant has config entries for."""
+    coordinator.async_set_configured_patients(patient_ids)
+    return coordinator
 
 
 def with_previous_success(coordinator, *, minutes_ago: float):
     """Give the coordinator a snapshot fetched some minutes ago."""
     seen = dt_util.utcnow() - timedelta(minutes=minutes_ago)
-    coordinator.data = {PATIENT_ID: dict(MEASUREMENT)}
+    coordinator.data = {PATIENT_ID: measurement(minutes_ago=minutes_ago)}
     coordinator._last_successful_update = seen
-    coordinator._patient_seen[PATIENT_ID] = seen
+    coordinator._measured_at[PATIENT_ID] = seen
     return coordinator
 
 
@@ -98,7 +103,7 @@ def succeed(coordinator, measurements=None):
         return_value=(
             measurements
             if measurements is not None
-            else {PATIENT_ID: dict(MEASUREMENT)}
+            else {PATIENT_ID: measurement()}
         )
     )
 
@@ -120,7 +125,7 @@ async def test_keeps_last_measurement_inside_grace_period(coordinator, error) ->
     with_previous_success(coordinator, minutes_ago=5)
     fail_with(coordinator, error)
 
-    assert await coordinator._async_update_data() == {PATIENT_ID: MEASUREMENT}
+    assert await coordinator._async_update_data() is coordinator.data
 
 
 @pytest.mark.parametrize("error", TRANSIENT_ERRORS)
@@ -142,7 +147,7 @@ async def test_grace_period_boundary(coordinator) -> None:
 
     with_previous_success(coordinator, minutes_ago=grace_minutes - 1)
     fail_with(coordinator, TimeoutError())
-    assert await coordinator._async_update_data() == {PATIENT_ID: MEASUREMENT}
+    assert await coordinator._async_update_data() is coordinator.data
 
     with_previous_success(coordinator, minutes_ago=grace_minutes + 1)
     fail_with(coordinator, TimeoutError())
@@ -166,7 +171,7 @@ async def test_grace_period_is_measured_from_last_success_not_from_restart(
     coordinator,
 ) -> None:
     """Stale data present but no recorded success must not be served."""
-    coordinator.data = dict(MEASUREMENT)
+    coordinator.data = measurement()
     coordinator._last_successful_update = None
 
     fail_with(coordinator, TimeoutError())
@@ -189,7 +194,9 @@ async def test_recovery_resets_failure_state(coordinator) -> None:
 
     succeed(coordinator)
     before = dt_util.utcnow()
-    assert await coordinator._async_update_data() == {PATIENT_ID: MEASUREMENT}
+    recovered = await coordinator._async_update_data()
+
+    assert recovered[PATIENT_ID]["ValueInMgPerDl"] == 115
 
     assert coordinator._failure_label is None
     assert coordinator._server_error_count == 0
@@ -217,7 +224,7 @@ async def test_rate_limit_backoff(coordinator, retry_after, expected) -> None:
     with_previous_success(coordinator, minutes_ago=1)
     fail_with(coordinator, http_error(429, retry_after=retry_after))
 
-    assert await coordinator._async_update_data() == {PATIENT_ID: MEASUREMENT}
+    assert await coordinator._async_update_data() == coordinator.data
     assert coordinator.update_interval == expected
 
 
@@ -438,7 +445,7 @@ async def test_transient_authorization_failure_does_not_trigger_reauth(
     with_previous_success(coordinator, minutes_ago=1)
     fail_with(coordinator, error)
 
-    assert await coordinator._async_update_data() == {PATIENT_ID: MEASUREMENT}
+    assert await coordinator._async_update_data() is coordinator.data
 
 
 @pytest.mark.parametrize("error", [LibreLinkUpAuthorizationError("x"), http_error(403)])
@@ -463,11 +470,12 @@ OTHER_PATIENT = "patient-other"
 
 
 async def test_snapshot_keeps_patients_apart(coordinator) -> None:
+    configure(coordinator, PATIENT_ID, OTHER_PATIENT)
     succeed(
         coordinator,
         {
-            PATIENT_ID: {**MEASUREMENT, "ValueInMgPerDl": 76},
-            OTHER_PATIENT: {**MEASUREMENT, "ValueInMgPerDl": 249},
+            PATIENT_ID: measurement(value=76),
+            OTHER_PATIENT: measurement(value=249),
         },
     )
 
@@ -479,7 +487,7 @@ async def test_snapshot_keeps_patients_apart(coordinator) -> None:
 
 
 async def test_unknown_patient_is_never_available(coordinator) -> None:
-    succeed(coordinator, {PATIENT_ID: dict(MEASUREMENT)})
+    succeed(coordinator, {PATIENT_ID: measurement()})
     await coordinator.async_refresh()
 
     assert coordinator.is_patient_available(PATIENT_ID) is True
@@ -487,11 +495,12 @@ async def test_unknown_patient_is_never_available(coordinator) -> None:
 
 
 async def test_patient_without_a_reading_keeps_the_others_fresh(coordinator) -> None:
+    configure(coordinator, PATIENT_ID, OTHER_PATIENT)
     succeed(
         coordinator,
         {
-            PATIENT_ID: {**MEASUREMENT, "ValueInMgPerDl": 76},
-            OTHER_PATIENT: {**MEASUREMENT, "ValueInMgPerDl": 249},
+            PATIENT_ID: measurement(value=76),
+            OTHER_PATIENT: measurement(value=249),
         },
     )
     await coordinator.async_refresh()
@@ -499,7 +508,7 @@ async def test_patient_without_a_reading_keeps_the_others_fresh(coordinator) -> 
     succeed(
         coordinator,
         {
-            PATIENT_ID: {**MEASUREMENT, "ValueInMgPerDl": 80},
+            PATIENT_ID: measurement(value=80),
             OTHER_PATIENT: None,
         },
     )
@@ -514,14 +523,15 @@ async def test_patient_without_a_reading_keeps_the_others_fresh(coordinator) -> 
 
 
 async def test_patient_grace_period_expires_individually(coordinator) -> None:
+    configure(coordinator, PATIENT_ID, OTHER_PATIENT)
     succeed(
         coordinator,
-        {PATIENT_ID: dict(MEASUREMENT), OTHER_PATIENT: dict(MEASUREMENT)},
+        {PATIENT_ID: measurement(), OTHER_PATIENT: measurement()},
     )
     await coordinator.async_refresh()
 
-    coordinator._patient_seen[OTHER_PATIENT] = (
-        dt_util.utcnow() - STALE_FAILURE_GRACE_PERIOD - timedelta(minutes=1)
+    coordinator._measured_at[OTHER_PATIENT] = (
+        dt_util.utcnow() - MAX_MEASUREMENT_AGE - timedelta(minutes=1)
     )
 
     assert coordinator.is_patient_available(PATIENT_ID) is True
@@ -529,7 +539,8 @@ async def test_patient_grace_period_expires_individually(coordinator) -> None:
 
 
 async def test_patient_problem_warns_only_once(coordinator, caplog) -> None:
-    succeed(coordinator, {PATIENT_ID: dict(MEASUREMENT), OTHER_PATIENT: None})
+    configure(coordinator, PATIENT_ID, OTHER_PATIENT)
+    succeed(coordinator, {PATIENT_ID: measurement(), OTHER_PATIENT: None})
     caplog.set_level(logging.DEBUG)
 
     for _ in range(4):
@@ -547,10 +558,11 @@ async def test_patient_problem_warns_only_once(coordinator, caplog) -> None:
 
 
 async def test_patient_problem_warns_again_after_recovery(coordinator, caplog) -> None:
+    configure(coordinator, OTHER_PATIENT)
     succeed(coordinator, {OTHER_PATIENT: None})
     await coordinator.async_refresh()
 
-    succeed(coordinator, {OTHER_PATIENT: dict(MEASUREMENT)})
+    succeed(coordinator, {OTHER_PATIENT: measurement()})
     await coordinator.async_refresh()
 
     caplog.clear()

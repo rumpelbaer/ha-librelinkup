@@ -5,6 +5,12 @@ from datetime import UTC, datetime
 from math import isfinite
 
 
+# The factor used in diabetes care. Home Assistant's own blood glucose converter
+# uses a flat 18.0, which is why the integration converts here instead of
+# reporting mg/dL natively and letting Home Assistant do it: a native mg/dL
+# sensor hands an mmol/L user a state of 6.38888888888889 (verified against
+# Home Assistant 2026.2), while mmol/L natively gives them 6.4 and costs a
+# mg/dL user 0.2 mg/dL of display precision.
 MG_DL_PER_MMOL_L = 18.0182
 
 # LibreLinkUp reports "FactoryTimestamp" as "M/D/YYYY h:mm:ss AM/PM" in UTC.

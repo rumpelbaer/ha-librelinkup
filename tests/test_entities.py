@@ -71,8 +71,7 @@ def test_glucose_sensor() -> None:
     sensor = LibreLinkUpGlucoseSensor(coordinator, make_entry())
 
     assert sensor.native_value == 13.7
-    assert sensor.extra_state_attributes["glucose_mmol_l"] == 13.7
-    assert sensor.extra_state_attributes["glucose_mg_dl"] == 247
+    assert sensor.extra_state_attributes == {"glucose_mg_dl": 247}
 
 
 def test_glucose_sensor_converts_from_mg_dl_on_mmol_account() -> None:
@@ -90,8 +89,7 @@ def test_glucose_sensor_converts_from_mg_dl_on_mmol_account() -> None:
 
     assert sensor.native_value == 13.7
     assert sensor.native_unit_of_measurement == "mmol/L"
-    assert sensor.extra_state_attributes["glucose_mmol_l"] == 13.7
-    assert sensor.extra_state_attributes["glucose_mg_dl"] == 247
+    assert sensor.extra_state_attributes == {"glucose_mg_dl": 247}
 
 
 def test_glucose_sensor_converts_from_mg_dl_on_mg_dl_account() -> None:
@@ -113,7 +111,7 @@ def test_glucose_sensor_converts_from_mg_dl_on_mg_dl_account() -> None:
     assert sensor.native_value == 13.7
     assert sensor.native_value != 247
     assert sensor.native_unit_of_measurement == "mmol/L"
-    assert sensor.extra_state_attributes["glucose_mmol_l"] == 13.7
+    assert sensor.extra_state_attributes == {"glucose_mg_dl": 247}
 
 
 def test_glucose_sensor_native_state_ignores_value_field() -> None:
@@ -128,7 +126,7 @@ def test_glucose_sensor_native_state_ignores_value_field() -> None:
     sensor = LibreLinkUpGlucoseSensor(coordinator, make_entry())
 
     assert sensor.native_value == 6.4
-    assert sensor.extra_state_attributes["glucose_mmol_l"] == 6.4
+    assert sensor.extra_state_attributes == {"glucose_mg_dl": 115}
 
 
 @pytest.mark.parametrize("raw", [115, 115.0, "115"])
@@ -156,7 +154,7 @@ def test_glucose_sensor_returns_none_for_invalid_data(data) -> None:
     sensor = LibreLinkUpGlucoseSensor(coordinator, make_entry())
 
     assert sensor.native_value is None
-    assert sensor.extra_state_attributes["glucose_mmol_l"] is None
+    assert "glucose_mmol_l" not in sensor.extra_state_attributes
 
 
 @pytest.mark.parametrize(
@@ -221,81 +219,47 @@ def test_last_reading_sensor() -> None:
     )
 
 
-def test_reading_age(monkeypatch) -> None:
+def test_reading_age(freezer) -> None:
+    """Frozen through Home Assistant's own clock, not by patching datetime."""
+    freezer.move_to("2026-09-14 11:15:35+00:00")
+
     coordinator = FakeCoordinator(
         {
             "FactoryTimestamp": "9/14/2026 11:12:35 AM",
         }
-    )
-
-    class FixedDateTime(datetime):
-        @classmethod
-        def now(cls, tz=None):
-            return datetime(
-                2026,
-                9,
-                14,
-                11,
-                15,
-                35,
-                tzinfo=UTC,
-            )
-
-    monkeypatch.setattr(
-        "custom_components.librelinkup.sensor.datetime",
-        FixedDateTime,
     )
 
     sensor = LibreLinkUpReadingAgeSensor(coordinator, make_entry())
 
     assert sensor.native_value == 3
 
+    freezer.move_to("2026-09-14 12:12:35+00:00")
+    assert sensor.native_value == 60
 
-def test_data_stale(monkeypatch) -> None:
+
+def test_reading_age_is_disabled_by_default() -> None:
+    """It changes every minute, so it must not fill the recorder unasked."""
+    sensor = LibreLinkUpReadingAgeSensor(FakeCoordinator({}), make_entry())
+
+    assert sensor.entity_registry_enabled_default is False
+    # Long term statistics of "how old is the reading" carry no information.
+    assert sensor.state_class is None
+
+
+def test_data_stale(freezer) -> None:
+    freezer.move_to("2026-09-14 11:15:35+00:00")
+
     coordinator = FakeCoordinator(
         {
             "FactoryTimestamp": "9/14/2026 11:12:35 AM",
         }
     )
 
-    class FreshDateTime(datetime):
-        @classmethod
-        def now(cls, tz=None):
-            return datetime(
-                2026,
-                9,
-                14,
-                11,
-                15,
-                35,
-                tzinfo=UTC,
-            )
-
-    monkeypatch.setattr(
-        "custom_components.librelinkup.binary_sensor.datetime",
-        FreshDateTime,
-    )
-
     sensor = LibreLinkUpDataStaleSensor(coordinator, make_entry())
+
     assert sensor.is_on is False
 
-    class StaleDateTime(datetime):
-        @classmethod
-        def now(cls, tz=None):
-            return datetime(
-                2026,
-                9,
-                14,
-                11,
-                20,
-                35,
-                tzinfo=UTC,
-            )
-
-    monkeypatch.setattr(
-        "custom_components.librelinkup.binary_sensor.datetime",
-        StaleDateTime,
-    )
+    freezer.move_to("2026-09-14 11:20:35+00:00")
 
     assert sensor.is_on is True
 
@@ -413,3 +377,21 @@ def test_entities_parse_pm_timestamps(german_lc_time) -> None:
     )
     assert LibreLinkUpReadingAgeSensor(coordinator, make_entry()).native_value is not None
     assert LibreLinkUpDataStaleSensor(coordinator, make_entry()).is_on is True
+
+
+def test_the_native_unit_stays_mmol_l() -> None:
+    """Why the state is mmol/L although the API's own field is mg/dL.
+
+    Reporting mg/dL natively and letting Home Assistant convert looks tidier, but
+    Home Assistant's blood glucose converter uses a flat factor of 18.0 and does
+    not round: an mmol/L user would get a state of 6.38888888888889 instead of
+    6.4. Converting here with the factor used in diabetes care keeps the primary
+    unit clean and costs a mg/dL user 0.2 mg/dL of display precision.
+    """
+    coordinator = FakeCoordinator({"ValueInMgPerDl": 115})
+    sensor = LibreLinkUpGlucoseSensor(coordinator, make_entry())
+
+    assert sensor.native_unit_of_measurement == "mmol/L"
+    assert sensor.native_value == 6.4
+    # The exact value the API sent stays available for anyone who needs it.
+    assert sensor.extra_state_attributes["glucose_mg_dl"] == 115

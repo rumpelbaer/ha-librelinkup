@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
+from datetime import timedelta
 
 from homeassistant.components.binary_sensor import BinarySensorDeviceClass, BinarySensorEntity
 from homeassistant.config_entries import ConfigEntry
@@ -8,6 +8,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity import EntityCategory
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
+from homeassistant.util import dt as dt_util
 
 from .const import CONF_PATIENT_ID
 from .coordinator import LibreLinkUpAccountCoordinator
@@ -83,7 +84,7 @@ class LibreLinkUpDataStaleSensor(LibreLinkUpBinarySensorBase):
         if measured_at is None:
             return True
 
-        return datetime.now(UTC) - measured_at > STALE_AFTER
+        return dt_util.utcnow() - measured_at > STALE_AFTER
 
 
 class LibreLinkUpLowSensor(LibreLinkUpBinarySensorBase):

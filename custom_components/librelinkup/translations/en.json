@@ -27,11 +27,30 @@
     "error": {
       "invalid_auth": "Invalid email address or password.",
       "cannot_connect": "Could not connect to LibreLinkUp.",
-      "no_connections": "No LibreLinkUp connections were found for this account."
+      "no_connections": "No LibreLinkUp connections were found for this account.",
+      "share_revoked": "This person is no longer sharing their glucose data with this LibreLinkUp account.",
+      "unsupported_region": "This LibreLinkUp account is hosted in a region this integration does not support.",
+      "account_state": "LibreLinkUp accepted the request but refused the login. Open the LibreLinkUp app and check whether the account has to confirm something, such as new terms of use.",
+      "invalid_response": "LibreLinkUp returned data this integration could not read. The API may have changed.",
+      "unknown": "An unexpected error occurred. Check the Home Assistant log for details."
     },
     "abort": {
       "reauth_successful": "Re-authentication was successful.",
       "already_configured": "This LibreLinkUp connection is already configured."
+    }
+  },
+  "issues": {
+    "share_revoked": {
+      "title": "LibreLinkUp share removed",
+      "description": "The person configured in \"{entry_title}\" no longer shares their glucose data with this LibreLinkUp account, so their entities are unavailable.\n\nShare the data again in the LibreLinkUp app, or remove this entry from Home Assistant."
+    },
+    "account_state": {
+      "title": "LibreLinkUp login refused",
+      "description": "LibreLinkUp refused the login for the account used by \"{entry_title}\", for a reason a new password cannot fix.\n\nOpen the LibreLinkUp app and check whether the account has to confirm something, such as new terms of use, and whether it is still active."
+    },
+    "legacy_entry": {
+      "title": "LibreLinkUp entry has no person selected",
+      "description": "The entry \"{entry_title}\" was created before this integration stored which person it belongs to, so it cannot be loaded without risking data from the wrong person.\n\nRemove the entry and add it again."
     }
   }
 }

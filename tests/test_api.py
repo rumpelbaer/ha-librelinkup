@@ -1,27 +1,18 @@
 from __future__ import annotations
 
-import importlib.util
 import unittest
 from unittest.mock import AsyncMock
-from pathlib import Path
 
 from aiohttp import ClientResponseError
 
-
-API_PATH = (
-    Path(__file__).resolve().parents[1]
-    / "custom_components"
-    / "librelinkup"
-    / "api.py"
+from custom_components.librelinkup import api as api_module
+from custom_components.librelinkup.api import (
+    LibreLinkUpAccountStateError,
+    LibreLinkUpApi,
+    LibreLinkUpAuthenticationError,
+    LibreLinkUpRegionError,
+    LibreLinkUpResponseError,
 )
-
-spec = importlib.util.spec_from_file_location("librelinkup_api", API_PATH)
-api_module = importlib.util.module_from_spec(spec)
-assert spec.loader is not None
-spec.loader.exec_module(api_module)
-
-LibreLinkUpApi = api_module.LibreLinkUpApi
-LibreLinkUpAuthenticationError = api_module.LibreLinkUpAuthenticationError
 
 
 class FakeResponse:
@@ -243,7 +234,7 @@ import pytest
 from multidict import CIMultiDict, CIMultiDictProxy
 from aiohttp import ContentTypeError, RequestInfo
 
-LibreLinkUpResponseError = api_module.LibreLinkUpResponseError
+# LibreLinkUpResponseError is imported at the top of this module.
 
 TOKEN = "super-secret-bearer-token"
 PATIENT_ID = "patient-uuid-0001"
@@ -552,10 +543,15 @@ async def test_unknown_patient_is_simply_absent() -> None:
         {"ValueInMgPerDl": 115},
         {**VALID_MEASUREMENT, "ValueInMgPerDl": None},
         {**VALID_MEASUREMENT, "FactoryTimestamp": None},
-        {**VALID_MEASUREMENT, "TrendArrow": None},
         {**VALID_MEASUREMENT, "ValueInMgPerDl": []},
         {**VALID_MEASUREMENT, "FactoryTimestamp": {}},
-        {**VALID_MEASUREMENT, "TrendArrow": []},
+        # A value that is not a finite number is as unusable as a missing one.
+        {**VALID_MEASUREMENT, "ValueInMgPerDl": "not-a-number"},
+        {**VALID_MEASUREMENT, "ValueInMgPerDl": True},
+        # Freshness comes from FactoryTimestamp, so a reading whose age cannot
+        # be established must not be served either.
+        {**VALID_MEASUREMENT, "FactoryTimestamp": "2026-09-14T11:12:35Z"},
+        {**VALID_MEASUREMENT, "FactoryTimestamp": ""},
     ],
 )
 async def test_unusable_measurement_maps_to_none(measurement) -> None:

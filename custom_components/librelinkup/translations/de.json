@@ -27,11 +27,30 @@
     "error": {
       "invalid_auth": "E-Mail-Adresse oder Passwort ist ungültig.",
       "cannot_connect": "Verbindung zu LibreLinkUp konnte nicht hergestellt werden.",
-      "no_connections": "Für dieses LibreLinkUp-Konto wurden keine Verbindungen gefunden."
+      "no_connections": "Für dieses LibreLinkUp-Konto wurden keine Verbindungen gefunden.",
+      "share_revoked": "Diese Person teilt ihre Glukosedaten nicht mehr mit diesem LibreLinkUp-Konto.",
+      "unsupported_region": "Dieses LibreLinkUp-Konto liegt in einer Region, die diese Integration nicht unterstützt.",
+      "account_state": "LibreLinkUp hat die Anfrage angenommen, den Login aber abgelehnt. Öffne die LibreLinkUp-App und prüfe, ob das Konto etwas bestätigen muss, zum Beispiel neue Nutzungsbedingungen.",
+      "invalid_response": "LibreLinkUp hat Daten geliefert, die diese Integration nicht lesen konnte. Möglicherweise hat sich die API geändert.",
+      "unknown": "Ein unerwarteter Fehler ist aufgetreten. Details stehen im Home-Assistant-Log."
     },
     "abort": {
       "reauth_successful": "Die erneute Authentifizierung war erfolgreich.",
       "already_configured": "Diese LibreLinkUp-Verbindung ist bereits eingerichtet."
+    }
+  },
+  "issues": {
+    "share_revoked": {
+      "title": "LibreLinkUp-Freigabe entfernt",
+      "description": "Die in „{entry_title}“ konfigurierte Person teilt ihre Glukosedaten nicht mehr mit diesem LibreLinkUp-Konto. Ihre Entities sind deshalb nicht verfügbar.\n\nGib die Daten in der LibreLinkUp-App erneut frei oder entferne diesen Eintrag aus Home Assistant."
+    },
+    "account_state": {
+      "title": "LibreLinkUp-Login abgelehnt",
+      "description": "LibreLinkUp hat den Login für das von „{entry_title}“ verwendete Konto abgelehnt – aus einem Grund, den ein neues Passwort nicht behebt.\n\nÖffne die LibreLinkUp-App und prüfe, ob das Konto etwas bestätigen muss, zum Beispiel neue Nutzungsbedingungen, und ob es noch aktiv ist."
+    },
+    "legacy_entry": {
+      "title": "LibreLinkUp-Eintrag ohne ausgewählte Person",
+      "description": "Der Eintrag „{entry_title}“ wurde erstellt, bevor diese Integration die zugehörige Person gespeichert hat. Er kann nicht geladen werden, ohne zu riskieren, Daten der falschen Person anzuzeigen.\n\nEntferne den Eintrag und richte ihn erneut ein."
     }
   }
 }

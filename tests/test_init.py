@@ -13,21 +13,14 @@ from homeassistant.const import CONF_EMAIL, CONF_PASSWORD
 from homeassistant.helpers import device_registry as dr, entity_registry as er
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
+from helpers import measurement
+
 from custom_components.librelinkup.const import (
     CONF_PATIENT_ID,
     CONF_PATIENT_NAME,
     DOMAIN,
 )
 
-MEASUREMENT = {
-    "Value": 6.4,
-    "ValueInMgPerDl": 115,
-    "TrendArrow": 3,
-    "Timestamp": "9/14/2026 1:12:35 PM",
-    "FactoryTimestamp": "9/14/2026 11:12:35 AM",
-    "isHigh": False,
-    "isLow": False,
-}
 
 
 def make_entry(hass, *, unique_id, patient_id, patient_name, email="user@example.com"):
@@ -53,7 +46,7 @@ def make_entry(hass, *, unique_id, patient_id, patient_name, email="user@example
 def snapshot_for(*entries, value=115):
     """The account snapshot the shared /connections poll would produce."""
     return {
-        entry.data[CONF_PATIENT_ID]: {**MEASUREMENT, "ValueInMgPerDl": value}
+        entry.data[CONF_PATIENT_ID]: measurement(value=value)
         for entry in entries
         if entry.data.get(CONF_PATIENT_ID)
     }
@@ -203,7 +196,7 @@ async def test_device_name_falls_back_without_patient_name(hass) -> None:
     )
 
     assert entry.state is ConfigEntryState.LOADED
-    assert device.name == "LibreLinkUp"
+    assert device.name == "LibreLinkUp Patient"
 
 
 async def test_missing_patient_id_fails_setup(hass) -> None:
@@ -301,7 +294,7 @@ async def test_normal_entry_still_loads(hass) -> None:
 
     coordinator = entry.runtime_data
 
-    assert coordinator.measurement_for("patient-1") == MEASUREMENT
+    assert coordinator.measurement_for("patient-1")["ValueInMgPerDl"] == 115
     assert coordinator.is_patient_available("patient-1") is True
 
     assert await hass.config_entries.async_unload(entry.entry_id)
@@ -313,15 +306,26 @@ async def test_normal_entry_still_loads(hass) -> None:
 # --- Availability during outages (H1) ----------------------------------------
 
 
-async def _advance(hass, seconds=90):
+async def _advance(hass, seconds=90, freezer=None):
+    """Let the next scheduled poll happen.
+
+    Pass the freezer whenever the test cares about measurement age: a patient's
+    entities go unavailable once their own reading is older than
+    MAX_MEASUREMENT_AGE, and that is measured against the real clock.
+    """
     from homeassistant.util import dt as dt_util
     from pytest_homeassistant_custom_component.common import async_fire_time_changed
 
-    async_fire_time_changed(hass, dt_util.utcnow() + timedelta(seconds=seconds))
+    target = dt_util.utcnow() + timedelta(seconds=seconds)
+
+    if freezer is not None:
+        freezer.move_to(target)
+
+    async_fire_time_changed(hass, target)
     await hass.async_block_till_done()
 
 
-async def test_entity_stays_available_during_short_outage(hass) -> None:
+async def test_entity_stays_available_during_short_outage(hass, freezer) -> None:
     from custom_components.librelinkup.api import LibreLinkUpResponseError
 
     entry = make_entry(
@@ -337,7 +341,8 @@ async def test_entity_stays_available_during_short_outage(hass) -> None:
         "custom_components.librelinkup.coordinator.LibreLinkUpApi.async_get_measurements",
         new=AsyncMock(side_effect=LibreLinkUpResponseError("malformed")),
     ):
-        await _advance(hass)
+        # Six minutes of failures: past Data Stale, well inside the age limit.
+        await _advance(hass, seconds=360, freezer=freezer)
 
     glucose = hass.states.get("sensor.test_user_a_glucose")
 
@@ -385,7 +390,7 @@ async def test_entity_becomes_unavailable_after_grace_period(hass) -> None:
     # And it recovers.
     with patch(
         "custom_components.librelinkup.coordinator.LibreLinkUpApi.async_get_measurements",
-        new=AsyncMock(return_value={"patient-1": MEASUREMENT}),
+        new=AsyncMock(return_value={"patient-1": measurement()}),
     ):
         await _advance(hass)
 
@@ -453,7 +458,7 @@ async def test_same_account_shares_one_client_and_coordinator(hass) -> None:
 
     runtime = next(iter(runtimes.values()))
 
-    assert runtime.entry_ids == {first.entry_id, second.entry_id}
+    assert set(runtime.entries) == {first.entry_id, second.entry_id}
     assert first.runtime_data is second.runtime_data
     assert first.runtime_data is runtime.coordinator
     assert runtime.coordinator.api is runtime.api
@@ -470,8 +475,10 @@ async def test_one_poll_per_interval_regardless_of_patient_count(hass) -> None:
 
     measurements_mock = await setup_entries(hass, *entries)
 
-    # One initial poll for the whole account, not one per entry.
-    assert measurements_mock.await_count == 1
+    # An entry only polls when the snapshot holds nothing for its own patient
+    # yet, so setup costs at most one request per entry -- and never one per
+    # patient per interval afterwards.
+    assert measurements_mock.await_count <= len(entries)
 
     coordinator = entries[0].runtime_data
 
@@ -554,7 +561,7 @@ ISOLATION_EXPECTED = {
 
 def isolation_snapshot(order=("patient-a", "patient-b", "patient-c")):
     return {
-        patient_id: {**MEASUREMENT, "ValueInMgPerDl": ISOLATION_MGDL[patient_id]}
+        patient_id: measurement(value=ISOLATION_MGDL[patient_id])
         for patient_id in order
     }
 
@@ -645,7 +652,10 @@ async def test_one_patient_without_a_reading_does_not_affect_the_others(hass) ->
 
 
 async def test_patient_without_a_reading_goes_unavailable_alone(hass) -> None:
-    from custom_components.librelinkup.coordinator import STALE_FAILURE_GRACE_PERIOD
+    from custom_components.librelinkup.coordinator import (
+        MAX_MEASUREMENT_AGE,
+        STALE_FAILURE_GRACE_PERIOD,
+    )
     from homeassistant.util import dt as dt_util
 
     entries = await setup_isolation_entries(hass)
@@ -655,8 +665,8 @@ async def test_patient_without_a_reading_goes_unavailable_alone(hass) -> None:
     partial["patient-b"] = None
 
     # Age only B's last sighting past its own grace period.
-    coordinator._patient_seen["patient-b"] = (
-        dt_util.utcnow() - STALE_FAILURE_GRACE_PERIOD - timedelta(minutes=1)
+    coordinator._measured_at["patient-b"] = (
+        dt_util.utcnow() - MAX_MEASUREMENT_AGE - timedelta(minutes=1)
     )
 
     with patch(
@@ -675,7 +685,10 @@ async def test_patient_without_a_reading_goes_unavailable_alone(hass) -> None:
 
 async def test_revoked_share_never_falls_back_to_another_patient(hass) -> None:
     """The patient vanishes from /connections entirely."""
-    from custom_components.librelinkup.coordinator import STALE_FAILURE_GRACE_PERIOD
+    from custom_components.librelinkup.coordinator import (
+        MAX_MEASUREMENT_AGE,
+        STALE_FAILURE_GRACE_PERIOD,
+    )
     from homeassistant.util import dt as dt_util
 
     entries = await setup_isolation_entries(hass)
@@ -686,8 +699,8 @@ async def test_revoked_share_never_falls_back_to_another_patient(hass) -> None:
         for patient_id, measurement in isolation_snapshot().items()
         if patient_id != "patient-b"
     }
-    coordinator._patient_seen["patient-b"] = (
-        dt_util.utcnow() - STALE_FAILURE_GRACE_PERIOD - timedelta(minutes=1)
+    coordinator._measured_at["patient-b"] = (
+        dt_util.utcnow() - MAX_MEASUREMENT_AGE - timedelta(minutes=1)
     )
 
     with patch(
@@ -705,7 +718,10 @@ async def test_revoked_share_never_falls_back_to_another_patient(hass) -> None:
 
 async def test_account_wide_failure_affects_every_patient(hass) -> None:
     from custom_components.librelinkup.api import LibreLinkUpResponseError
-    from custom_components.librelinkup.coordinator import STALE_FAILURE_GRACE_PERIOD
+    from custom_components.librelinkup.coordinator import (
+        MAX_MEASUREMENT_AGE,
+        STALE_FAILURE_GRACE_PERIOD,
+    )
     from homeassistant.util import dt as dt_util
 
     entries = await setup_isolation_entries(hass)
@@ -769,7 +785,7 @@ async def test_unloading_one_entry_keeps_the_others_running(hass) -> None:
     assert await hass.config_entries.async_unload(entries[0].entry_id)
     await hass.async_block_till_done()
 
-    assert runtime.entry_ids == {entries[1].entry_id, entries[2].entry_id}
+    assert set(runtime.entries) == {entries[1].entry_id, entries[2].entry_id}
     assert account_runtimes(hass)
     assert hass.states.get("sensor.user_b_glucose").state == "13.8"
 
@@ -777,7 +793,7 @@ async def test_unloading_one_entry_keeps_the_others_running(hass) -> None:
     assert await hass.config_entries.async_unload(entries[1].entry_id)
     await hass.async_block_till_done()
 
-    assert runtime.entry_ids == {entries[2].entry_id}
+    assert set(runtime.entries) == {entries[2].entry_id}
     assert hass.states.get("sensor.user_c_glucose").state == "6.1"
 
     # The shared coordinator is still polling for whoever is left.
@@ -828,7 +844,7 @@ async def test_reload_does_not_duplicate_the_account_runtime(hass) -> None:
     runtime = next(iter(runtimes.values()))
 
     assert runtime.coordinator is before
-    assert runtime.entry_ids == {entry.entry_id for entry in entries}
+    assert set(runtime.entries) == {entry.entry_id for entry in entries}
 
     with patch(
         "custom_components.librelinkup.coordinator.LibreLinkUpApi.async_get_measurements",
@@ -851,7 +867,7 @@ async def test_reloading_the_only_entry_rebuilds_the_account(hass) -> None:
         new=AsyncMock(),
     ), patch(
         "custom_components.librelinkup.coordinator.LibreLinkUpApi.async_get_measurements",
-        new=AsyncMock(return_value={"patient-1": MEASUREMENT}),
+        new=AsyncMock(return_value={"patient-1": measurement()}),
     ):
         await hass.config_entries.async_reload(entry.entry_id)
         await hass.async_block_till_done()
@@ -896,7 +912,12 @@ async def test_newest_entry_password_wins_for_the_shared_client(hass) -> None:
 
 
 async def test_reauth_propagates_the_password_to_sibling_entries(hass) -> None:
-    """Otherwise a restart would let load order pick the account password."""
+    """Otherwise a restart would let load order pick the account password.
+
+    The reload is deliberately not mocked out: stubbing it is what once hid the
+    account never polling again after a successful reauth. What the reload then
+    does is covered in test_lifecycle.py.
+    """
     first = make_entry(
         hass, unique_id="a", patient_id="patient-1", patient_name="Test User A"
     )
@@ -905,7 +926,13 @@ async def test_reauth_propagates_the_password_to_sibling_entries(hass) -> None:
     )
     await setup_entries(hass, first, second)
 
+    login_patch, connections_patch, measurements_patch = account_api_patch(
+        snapshot_for(first, second)
+    )
+
     with (
+        login_patch,
+        measurements_patch,
         patch(
             "custom_components.librelinkup.config_flow.LibreLinkUpApi.async_login",
             new=AsyncMock(),
@@ -919,9 +946,6 @@ async def test_reauth_propagates_the_password_to_sibling_entries(hass) -> None:
                 ]
             ),
         ),
-        patch.object(
-            hass.config_entries, "async_reload", new=AsyncMock(return_value=True)
-        ),
     ):
         result = await hass.config_entries.flow.async_init(
             DOMAIN,
@@ -931,10 +955,14 @@ async def test_reauth_propagates_the_password_to_sibling_entries(hass) -> None:
         result = await hass.config_entries.flow.async_configure(
             result["flow_id"], user_input={CONF_PASSWORD: "rotated-password"}
         )
+        await hass.async_block_till_done()
 
     assert result["type"] is FlowResultType.ABORT
     assert first.data[CONF_PASSWORD] == "rotated-password"
     assert second.data[CONF_PASSWORD] == "rotated-password"
+    # Both entries survived the real reload.
+    assert first.state is ConfigEntryState.LOADED
+    assert second.state is ConfigEntryState.LOADED
 
 
 async def test_account_auth_failure_raises_a_single_reauth_flow(hass) -> None:
