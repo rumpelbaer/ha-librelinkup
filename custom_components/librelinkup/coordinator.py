@@ -32,19 +32,13 @@ class LibreLinkUpCoordinator(DataUpdateCoordinator[dict]):
             entry.data[CONF_PASSWORD],
         )
 
-        self.patient_id: str | None = entry.data.get(CONF_PATIENT_ID)
+        # Required by async_setup_entry, which rejects entries without it.
+        # Never derived from the API: picking a connection here could silently
+        # attach the entry to a different person.
+        self.patient_id: str = entry.data[CONF_PATIENT_ID]
 
     async def _async_update_data(self) -> dict:
         try:
-            if self.patient_id is None:
-                await self.api.async_login()
-                connections = await self.api.async_get_connections()
-
-                if not connections:
-                    raise RuntimeError("No LibreLinkUp connections found")
-
-                self.patient_id = connections[0]["patientId"]
-
             measurement = await self.api.async_get_glucose_measurement(
                 self.patient_id
             )
