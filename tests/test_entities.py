@@ -26,18 +26,31 @@ from custom_components.librelinkup.utils import (
 )
 
 
+PATIENT_ID = "test-patient"
+
+
 class FakeCoordinator:
-    def __init__(self, data: dict) -> None:
-        self.data = data
+    """Stands in for the shared account coordinator, holding one patient."""
+
+    def __init__(self, data: dict, patient_id: str = PATIENT_ID) -> None:
+        self.data = {patient_id: data}
         self.last_update_success = True
+        self._patient_id = patient_id
+
+    def measurement_for(self, patient_id):
+        return self.data.get(patient_id)
+
+    def is_patient_available(self, patient_id) -> bool:
+        return patient_id in self.data
 
     def async_add_listener(self, update_callback, context=None):
         return lambda: None
 
 
-def make_entry():
+def make_entry(patient_id: str = PATIENT_ID):
     entry = MagicMock()
     entry.entry_id = "test-entry"
+    entry.data = {"patient_id": patient_id}
     return entry
 
 
