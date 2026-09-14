@@ -40,7 +40,7 @@ class LibreLinkUpGlucoseSensor(
     CoordinatorEntity[LibreLinkUpCoordinator],
     SensorEntity,
 ):
-    _attr_name = "LibreLinkUp Glucose"
+    _attr_name = "Glucose"
     _attr_device_class = SensorDeviceClass.BLOOD_GLUCOSE_CONCENTRATION
     _attr_native_unit_of_measurement = UnitOfBloodGlucoseConcentration.MILLIMOLE_PER_LITER
     _attr_state_class = SensorStateClass.MEASUREMENT
@@ -78,7 +78,7 @@ class LibreLinkUpTrendSensor(
     CoordinatorEntity[LibreLinkUpCoordinator],
     SensorEntity,
 ):
-    _attr_name = "LibreLinkUp Trend"
+    _attr_name = "Trend"
 
     def __init__(
         self,

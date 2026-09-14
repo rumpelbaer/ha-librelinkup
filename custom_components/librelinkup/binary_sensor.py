@@ -21,7 +21,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
 
 
 class LibreLinkUpDataStaleSensor(CoordinatorEntity[LibreLinkUpCoordinator], BinarySensorEntity):
-    _attr_name = "LibreLinkUp Data Stale"
+    _attr_name = "Data Stale"
     _attr_device_class = BinarySensorDeviceClass.PROBLEM
 
     def __init__(self, coordinator: LibreLinkUpCoordinator, entry: ConfigEntry) -> None:
