@@ -168,7 +168,12 @@ class TestLibreLinkUpRegionRedirect(unittest.IsolatedAsyncioTestCase):
         )
 
 class TestLibreLinkUpAuthenticationFailure(unittest.IsolatedAsyncioTestCase):
-    async def test_raises_authentication_error_after_failed_reauthentication(self) -> None:
+    async def test_raises_authorization_error_after_failed_reauthentication(self) -> None:
+        """A data request still rejected after a successful login is transient.
+
+        It must not be a LibreLinkUpAuthenticationError, or Home Assistant would
+        ask the user to re-enter a password that was just accepted.
+        """
         class Response:
             def __init__(self, status, payload=None):
                 self.status = status
@@ -211,11 +216,21 @@ class TestLibreLinkUpAuthenticationFailure(unittest.IsolatedAsyncioTestCase):
         api = LibreLinkUpApi(Session(), "test@example.com", "password")
         api._token = "expired-token"
         api._account_id = "account-id"
-        api.async_login = AsyncMock()
 
-        with self.assertRaises(LibreLinkUpAuthenticationError):
+        async def fake_login():
+            # A real login restores the credentials the retry needs; the old
+            # token was dropped before this call.
+            self.assertIsNone(api._token)
+            api._token = "fresh-token"
+            api._account_id = "account-id"
+
+        api.async_login = AsyncMock(side_effect=fake_login)
+
+        with self.assertRaises(api_module.LibreLinkUpAuthorizationError) as caught:
             await api._async_get_authenticated("/llu/connections")
 
+        self.assertNotIsInstance(caught.exception, LibreLinkUpAuthenticationError)
+        self.assertIsNone(caught.exception.__cause__)
         api.async_login.assert_awaited_once()
 
 

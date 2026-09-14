@@ -36,6 +36,15 @@ class LibreLinkUpRegionError(Exception):
     pass
 
 
+class LibreLinkUpAuthorizationError(Exception):
+    """A data request kept being rejected even after a successful login.
+
+    Deliberately not a LibreLinkUpAuthenticationError: the credentials were
+    accepted, so this is a transient server-side condition and must not make
+    Home Assistant ask the user to re-enter their password.
+    """
+
+
 class LibreLinkUpResponseError(Exception):
     """The API replied with something that cannot be interpreted safely.
 
@@ -219,9 +228,16 @@ class LibreLinkUpApi:
                     raise
 
                 if attempt == 1:
-                    raise LibreLinkUpAuthenticationError(
-                        "LibreLinkUp authentication failed after re-authentication"
-                    ) from err
+                    # The login itself succeeded, so the credentials are fine.
+                    # "from None" keeps the ClientResponseError -- whose repr
+                    # carries the bearer token -- out of any traceback.
+                    raise LibreLinkUpAuthorizationError(
+                        "LibreLinkUp rejected the request after re-authentication"
+                    ) from None
+
+                # Drop the rejected token so the retry cannot reuse it.
+                self._token = None
+                self._account_id = None
 
                 await self.async_login()
                 continue

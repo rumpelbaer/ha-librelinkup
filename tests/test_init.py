@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import timedelta
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -281,3 +282,123 @@ async def test_normal_entry_still_loads(hass) -> None:
     await hass.async_block_till_done()
 
     assert entry.state is ConfigEntryState.NOT_LOADED
+
+
+# --- Availability during outages (H1) ----------------------------------------
+
+
+async def _advance(hass, seconds=90):
+    from homeassistant.util import dt as dt_util
+    from pytest_homeassistant_custom_component.common import async_fire_time_changed
+
+    async_fire_time_changed(hass, dt_util.utcnow() + timedelta(seconds=seconds))
+    await hass.async_block_till_done()
+
+
+async def test_entity_stays_available_during_short_outage(hass) -> None:
+    from custom_components.librelinkup.api import LibreLinkUpResponseError
+
+    entry = make_entry(
+        hass, unique_id="a", patient_id="patient-1", patient_name="Test User A"
+    )
+    await setup_entries(hass, entry)
+
+    assert hass.states.get("sensor.test_user_a_glucose").state == "6.4"
+
+    coordinator = hass.data[DOMAIN][entry.entry_id]
+
+    with patch(
+        "custom_components.librelinkup.coordinator.LibreLinkUpApi.async_get_glucose_measurement",
+        new=AsyncMock(side_effect=LibreLinkUpResponseError("malformed")),
+    ):
+        await _advance(hass)
+
+    glucose = hass.states.get("sensor.test_user_a_glucose")
+
+    # Still the last valid reading, and still available.
+    assert glucose.state == "6.4"
+    assert coordinator.last_update_success is True
+    # Data Stale reports the problem via the measurement timestamp.
+    assert hass.states.get("binary_sensor.test_user_a_data_stale").state == "on"
+
+
+async def test_entity_becomes_unavailable_after_grace_period(hass) -> None:
+    from custom_components.librelinkup.api import LibreLinkUpResponseError
+    from custom_components.librelinkup.coordinator import (
+        STALE_FAILURE_GRACE_PERIOD,
+    )
+    from homeassistant.util import dt as dt_util
+
+    entry = make_entry(
+        hass, unique_id="a", patient_id="patient-1", patient_name="Test User A"
+    )
+    await setup_entries(hass, entry)
+
+    coordinator = hass.data[DOMAIN][entry.entry_id]
+
+    # Age the last success past the grace period instead of waiting 15 minutes.
+    coordinator._last_successful_update = (
+        dt_util.utcnow() - STALE_FAILURE_GRACE_PERIOD - timedelta(minutes=1)
+    )
+
+    with patch(
+        "custom_components.librelinkup.coordinator.LibreLinkUpApi.async_get_glucose_measurement",
+        new=AsyncMock(side_effect=LibreLinkUpResponseError("malformed")),
+    ):
+        await _advance(hass)
+
+    assert coordinator.last_update_success is False
+
+    for entity_id in (
+        "sensor.test_user_a_glucose",
+        "sensor.test_user_a_trend",
+        "binary_sensor.test_user_a_data_stale",
+    ):
+        assert hass.states.get(entity_id).state == "unavailable"
+
+    # And it recovers.
+    with patch(
+        "custom_components.librelinkup.coordinator.LibreLinkUpApi.async_get_glucose_measurement",
+        new=AsyncMock(return_value=MEASUREMENT),
+    ):
+        await _advance(hass)
+
+    assert coordinator.last_update_success is True
+    assert hass.states.get("sensor.test_user_a_glucose").state == "6.4"
+
+
+async def test_rate_limit_slows_polling_without_reauth(hass) -> None:
+    from aiohttp import ClientResponseError, RequestInfo
+    from multidict import CIMultiDict, CIMultiDictProxy
+
+    url = "https://api-de.libreview.io/llu/connections/patient-1/graph"
+    error = ClientResponseError(
+        RequestInfo(
+            url=url,
+            method="GET",
+            headers=CIMultiDictProxy(CIMultiDict()),
+            real_url=url,
+        ),
+        (),
+        status=429,
+        headers=CIMultiDictProxy(CIMultiDict({"Retry-After": "300"})),
+    )
+
+    entry = make_entry(
+        hass, unique_id="a", patient_id="patient-1", patient_name="Test User A"
+    )
+    await setup_entries(hass, entry)
+
+    coordinator = hass.data[DOMAIN][entry.entry_id]
+
+    assert coordinator.update_interval == timedelta(seconds=60)
+
+    with patch(
+        "custom_components.librelinkup.coordinator.LibreLinkUpApi.async_get_glucose_measurement",
+        new=AsyncMock(side_effect=error),
+    ):
+        await _advance(hass)
+
+    assert coordinator.update_interval == timedelta(seconds=300)
+    assert not hass.config_entries.flow.async_progress()
+    assert hass.states.get("sensor.test_user_a_glucose").state == "6.4"
