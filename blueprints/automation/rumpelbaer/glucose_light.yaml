@@ -2,7 +2,7 @@ blueprint:
   name: LibreLinkUp Glucose Light
   description: >
     Visualize LibreLinkUp glucose values with an RGB light.
-    Glucose thresholds are fully configurable by the user.
+    Glucose thresholds, colors, brightness and activation conditions are configurable.
   domain: automation
 
   input:
@@ -30,8 +30,8 @@ blueprint:
 
     very_low_threshold:
       name: Very low threshold
+      description: Values below this threshold are shown in the very low color.
       default: 3.0
-      description: Values below this threshold are shown in red.
       selector:
         number:
           min: 1
@@ -42,8 +42,8 @@ blueprint:
 
     low_threshold:
       name: Low threshold
+      description: Values below this threshold are shown in the low color.
       default: 3.9
-      description: Values below this threshold are shown in orange.
       selector:
         number:
           min: 1
@@ -54,8 +54,8 @@ blueprint:
 
     high_threshold:
       name: High threshold
+      description: Values up to this threshold are shown in the normal color.
       default: 10.0
-      description: Values up to this threshold are shown in green.
       selector:
         number:
           min: 1
@@ -66,8 +66,8 @@ blueprint:
 
     very_high_threshold:
       name: Very high threshold
+      description: Values above the high threshold up to this value use the high color. Higher values use the very high color.
       default: 13.9
-      description: Values above the high threshold up to this value are shown in yellow; higher values are violet.
       selector:
         number:
           min: 1
@@ -123,6 +123,59 @@ blueprint:
           step: 1
           mode: slider
 
+    activation_mode:
+      name: Activation mode
+      description: >
+        Choose when the glucose light should be active.
+        Presence modes are active when at least one selected person is home.
+      default: always
+      selector:
+        select:
+          options:
+            - always
+            - time
+            - presence
+            - time_and_presence
+            - time_or_presence
+
+    active_start_time:
+      name: Active from
+      description: Start of the active time window.
+      default: "07:00:00"
+      selector:
+        time:
+
+    active_end_time:
+      name: Active until
+      description: >
+        End of the active time window. Overnight windows such as 20:00 to 07:00 are supported.
+      default: "23:00:00"
+      selector:
+        time:
+
+    presence_entities:
+      name: Presence entities
+      description: >
+        Optional entities used by the presence activation modes.
+        An entity counts as present when its state is "home" or "on".
+        This supports person entities, input booleans, binary sensors
+        and other presence logic.
+      default: []
+      selector:
+        entity:
+          multiple: true
+
+    inactive_behavior:
+      name: Behavior while inactive
+      description: >
+        Turn the light off when activation conditions are not met, or leave its current state unchanged.
+      default: turn_off
+      selector:
+        select:
+          options:
+            - turn_off
+            - leave_unchanged
+
 mode: restart
 
 trigger:
@@ -132,14 +185,29 @@ trigger:
   - platform: state
     entity_id: !input stale_sensor
 
+  - platform: state
+    entity_id: !input presence_entities
+
+  - platform: time
+    at: !input active_start_time
+
+  - platform: time
+    at: !input active_end_time
+
+  - platform: homeassistant
+    event: start
+
 variables:
   glucose_entity: !input glucose_sensor
   stale_entity: !input stale_sensor
+
   very_low: !input very_low_threshold
   low: !input low_threshold
   high: !input high_threshold
   very_high: !input very_high_threshold
+
   light_brightness: !input brightness
+
   color_very_low: !input very_low_color
   color_low: !input low_color
   color_normal: !input normal_color
@@ -147,67 +215,115 @@ variables:
   color_very_high: !input very_high_color
   color_stale: !input stale_color
 
+  activation: !input activation_mode
+  active_start: !input active_start_time
+  active_end: !input active_end_time
+  persons: !input presence_entities
+  inactive_action: !input inactive_behavior
+
 action:
   - choose:
       - conditions:
           - condition: template
             value_template: >
-              {{ is_state(stale_entity, 'on')
-                 or states(glucose_entity) in ['unknown', 'unavailable'] }}
-        sequence:
-          - service: light.turn_on
-            target: !input target_light
-            data:
-              rgb_color: "{{ color_stale }}"
-              brightness: "{{ light_brightness }}"
+              {% set current = now().strftime('%H:%M:%S') %}
 
-      - conditions:
-          - condition: template
-            value_template: >
-              {{ states(glucose_entity) | float(999) < very_low | float }}
-        sequence:
-          - service: light.turn_on
-            target: !input target_light
-            data:
-              rgb_color: "{{ color_very_low }}"
-              brightness: "{{ light_brightness }}"
+              {% if active_start <= active_end %}
+                {% set time_active = active_start <= current < active_end %}
+              {% else %}
+                {% set time_active = current >= active_start or current < active_end %}
+              {% endif %}
 
-      - conditions:
-          - condition: template
-            value_template: >
-              {{ states(glucose_entity) | float(999) < low | float }}
-        sequence:
-          - service: light.turn_on
-            target: !input target_light
-            data:
-              rgb_color: "{{ color_low }}"
-              brightness: "{{ light_brightness }}"
+              {% set ns = namespace(presence_active=false) %}
+              {% for entity in persons %}
+                {% if states(entity) in ['home', 'on'] %}
+                  {% set ns.presence_active = true %}
+                {% endif %}
+              {% endfor %}
 
-      - conditions:
-          - condition: template
-            value_template: >
-              {{ states(glucose_entity) | float(999) <= high | float }}
+              {% if activation == 'always' %}
+                {{ false }}
+              {% elif activation == 'time' %}
+                {{ not time_active }}
+              {% elif activation == 'presence' %}
+                {{ not ns.presence_active }}
+              {% elif activation == 'time_and_presence' %}
+                {{ not (time_active and ns.presence_active) }}
+              {% elif activation == 'time_or_presence' %}
+                {{ not (time_active or ns.presence_active) }}
+              {% else %}
+                {{ false }}
+              {% endif %}
         sequence:
-          - service: light.turn_on
-            target: !input target_light
-            data:
-              rgb_color: "{{ color_normal }}"
-              brightness: "{{ light_brightness }}"
-
-      - conditions:
-          - condition: template
-            value_template: >
-              {{ states(glucose_entity) | float(999) <= very_high | float }}
-        sequence:
-          - service: light.turn_on
-            target: !input target_light
-            data:
-              rgb_color: "{{ color_high }}"
-              brightness: "{{ light_brightness }}"
+          - choose:
+              - conditions:
+                  - condition: template
+                    value_template: "{{ inactive_action == 'turn_off' }}"
+                sequence:
+                  - service: light.turn_off
+                    target: !input target_light
 
     default:
-      - service: light.turn_on
-        target: !input target_light
-        data:
-          rgb_color: "{{ color_very_high }}"
-          brightness: "{{ light_brightness }}"
+      - choose:
+          - conditions:
+              - condition: template
+                value_template: >
+                  {{ is_state(stale_entity, 'on')
+                     or states(glucose_entity) in ['unknown', 'unavailable'] }}
+            sequence:
+              - service: light.turn_on
+                target: !input target_light
+                data:
+                  rgb_color: "{{ color_stale }}"
+                  brightness: "{{ light_brightness }}"
+
+          - conditions:
+              - condition: template
+                value_template: >
+                  {{ states(glucose_entity) | float(999) < very_low | float }}
+            sequence:
+              - service: light.turn_on
+                target: !input target_light
+                data:
+                  rgb_color: "{{ color_very_low }}"
+                  brightness: "{{ light_brightness }}"
+
+          - conditions:
+              - condition: template
+                value_template: >
+                  {{ states(glucose_entity) | float(999) < low | float }}
+            sequence:
+              - service: light.turn_on
+                target: !input target_light
+                data:
+                  rgb_color: "{{ color_low }}"
+                  brightness: "{{ light_brightness }}"
+
+          - conditions:
+              - condition: template
+                value_template: >
+                  {{ states(glucose_entity) | float(999) <= high | float }}
+            sequence:
+              - service: light.turn_on
+                target: !input target_light
+                data:
+                  rgb_color: "{{ color_normal }}"
+                  brightness: "{{ light_brightness }}"
+
+          - conditions:
+              - condition: template
+                value_template: >
+                  {{ states(glucose_entity) | float(999) <= very_high | float }}
+            sequence:
+              - service: light.turn_on
+                target: !input target_light
+                data:
+                  rgb_color: "{{ color_high }}"
+                  brightness: "{{ light_brightness }}"
+
+        default:
+          - service: light.turn_on
+            target: !input target_light
+            data:
+              rgb_color: "{{ color_very_high }}"
+              brightness: "{{ light_brightness }}"
