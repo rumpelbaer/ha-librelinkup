@@ -1,18 +1,55 @@
 from __future__ import annotations
 
-from homeassistant.components.sensor import SensorEntity
+from homeassistant.components.sensor import SensorDeviceClass, SensorEntity
 from homeassistant.config_entries import ConfigEntry
+from homeassistant.const import UnitOfConcentration
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
+from homeassistant.helpers.update_coordinator import CoordinatorEntity
+
+from .const import DOMAIN
+from .coordinator import LibreLinkUpCoordinator
 
 
-async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_entities: AddEntitiesCallback) -> None:
-    async_add_entities([LibreLinkUpTestSensor(entry)])
+async def async_setup_entry(
+    hass: HomeAssistant,
+    entry: ConfigEntry,
+    async_add_entities: AddEntitiesCallback,
+) -> None:
+    coordinator: LibreLinkUpCoordinator = hass.data[DOMAIN][entry.entry_id]
+    async_add_entities([LibreLinkUpGlucoseSensor(coordinator, entry)])
 
 
-class LibreLinkUpTestSensor(SensorEntity):
-    _attr_name = "LibreLinkUp Test"
-    _attr_native_value = 0
+class LibreLinkUpGlucoseSensor(
+    CoordinatorEntity[LibreLinkUpCoordinator],
+    SensorEntity,
+):
+    _attr_name = "LibreLinkUp Glucose"
+    _attr_device_class = SensorDeviceClass.BLOOD_GLUCOSE_CONCENTRATION
+    _attr_native_unit_of_measurement = UnitOfConcentration.MILLIGRAMS_PER_DECILITER
 
-    def __init__(self, entry: ConfigEntry) -> None:
-        self._attr_unique_id = f"{entry.entry_id}_test"
+    def __init__(
+        self,
+        coordinator: LibreLinkUpCoordinator,
+        entry: ConfigEntry,
+    ) -> None:
+        super().__init__(coordinator)
+        self._attr_unique_id = f"{entry.entry_id}_glucose"
+
+    @property
+    def native_value(self) -> int | None:
+        value = self.coordinator.data.get("ValueInMgPerDl")
+        return int(value) if value is not None else None
+
+    @property
+    def extra_state_attributes(self) -> dict:
+        data = self.coordinator.data
+        return {
+            "value_mmol_l": data.get("Value"),
+            "trend_arrow": data.get("TrendArrow"),
+            "timestamp": data.get("Timestamp"),
+            "factory_timestamp": data.get("FactoryTimestamp"),
+            "measurement_color": data.get("MeasurementColor"),
+            "is_high": data.get("isHigh"),
+            "is_low": data.get("isLow"),
+        }
