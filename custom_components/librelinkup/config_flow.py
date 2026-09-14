@@ -19,7 +19,6 @@ from homeassistant.helpers.selector import (
     TextSelectorType,
 )
 
-from . import account_key
 from .api import (
     LibreLinkUpAccountStateError,
     LibreLinkUpApi,
@@ -34,6 +33,7 @@ from .const import (
     DEFAULT_PATIENT_NAME,
     DOMAIN,
 )
+from .runtime import account_key
 
 _LOGGER = logging.getLogger(__name__)
 

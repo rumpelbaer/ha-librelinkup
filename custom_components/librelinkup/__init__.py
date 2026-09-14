@@ -1,14 +1,11 @@
 from __future__ import annotations
 
-import asyncio
-from dataclasses import dataclass, field
 from typing import NoReturn
 
 from homeassistant.config_entries import SOURCE_REAUTH, ConfigEntry
-from homeassistant.const import CONF_EMAIL, CONF_PASSWORD
+from homeassistant.const import CONF_PASSWORD
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.exceptions import ConfigEntryAuthFailed, ConfigEntryError, ConfigEntryNotReady
-from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 from .api import LibreLinkUpApi
@@ -21,54 +18,13 @@ from .const import (
     PLATFORMS,
 )
 from .coordinator import LibreLinkUpAccountCoordinator
-
-ISSUE_KINDS = (ISSUE_LEGACY_ENTRY, ISSUE_SHARE_REVOKED, ISSUE_ACCOUNT_STATE)
-
-
-@dataclass
-class AccountRuntime:
-    """Everything shared by the config entries of one LibreLinkUp account."""
-
-    api: LibreLinkUpApi
-    coordinator: LibreLinkUpAccountCoordinator
-    password: str
-    # entry_id -> patient_id of every loaded entry of this account. The patient
-    # IDs are what the coordinator is allowed to keep data for.
-    entries: dict[str, str] = field(default_factory=dict)
-    # Entries of one account are set up concurrently; the lock keeps them from
-    # each firing their own initial poll.
-    setup_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
-
-    @property
-    def patient_ids(self) -> frozenset[str]:
-        return frozenset(self.entries.values())
-
-
-def account_key(source: ConfigEntry | str) -> str:
-    """Runtime-only key for an account.
-
-    The normalized e-mail, never the password. This lives in hass.data and is
-    never persisted or logged.
-
-    Takes an entry or a bare e-mail, because the config flow has to ask "same
-    account?" about an entry that does not exist yet -- while adding a person,
-    the address is all there is. Both forms normalize here, so there is one
-    definition of when two config entries belong to the same LibreLinkUp
-    account.
-    """
-    email = source if isinstance(source, str) else source.data[CONF_EMAIL]
-
-    return email.strip().lower()
-
-
-def _issue_id(kind: str, entry_id: str) -> str:
-    """Repair issue ID for one config entry.
-
-    Keyed by the config entry ID, never by a patient ID: repair issues are
-    persisted in .storage and must not carry health identifiers.
-    """
-    return f"{kind}_{entry_id}"
-
+from .runtime import (
+    ISSUE_KINDS,
+    AccountRuntime,
+    account_key,
+    async_create_issue,
+    async_delete_issue,
+)
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     patient_id = entry.data.get(CONF_PATIENT_ID)
@@ -77,14 +33,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         # Retrying cannot fix this, and guessing a connection could attach the
         # entry to the wrong person, so fail permanently and let the user
         # re-add the entry.
-        _async_create_issue(hass, entry, ISSUE_LEGACY_ENTRY)
+        async_create_issue(hass, entry, ISSUE_LEGACY_ENTRY)
 
         raise ConfigEntryError(
             "This LibreLinkUp entry has no person selected. "
             "Remove it and set it up again."
         )
 
-    _async_delete_issue(hass, entry.entry_id, ISSUE_LEGACY_ENTRY)
+    async_delete_issue(hass, entry.entry_id, ISSUE_LEGACY_ENTRY)
 
     accounts: dict[str, AccountRuntime] = hass.data.setdefault(DOMAIN, {})
     key = account_key(entry)
@@ -235,7 +191,7 @@ async def _async_release(hass: HomeAssistant, key: str, entry_id: str) -> None:
     runtime.entries.pop(entry_id, None)
 
     for kind in ISSUE_KINDS:
-        _async_delete_issue(hass, entry_id, kind)
+        async_delete_issue(hass, entry_id, kind)
 
     if runtime.entries:
         # Drops everything the coordinator still held for the removed patient.
@@ -314,15 +270,15 @@ def _async_bind_runtime(hass: HomeAssistant, runtime: AccountRuntime) -> None:
                 continue
 
             if patient_id in patient_ids:
-                _async_create_issue(hass, entry, ISSUE_SHARE_REVOKED)
+                async_create_issue(hass, entry, ISSUE_SHARE_REVOKED)
             else:
-                _async_delete_issue(hass, entry_id, ISSUE_SHARE_REVOKED)
+                async_delete_issue(hass, entry_id, ISSUE_SHARE_REVOKED)
 
     @callback
     def report_account_state(problem: bool) -> None:
         if not problem:
             for entry_id in runtime.entries:
-                _async_delete_issue(hass, entry_id, ISSUE_ACCOUNT_STATE)
+                async_delete_issue(hass, entry_id, ISSUE_ACCOUNT_STATE)
             return
 
         if not runtime.entries:
@@ -333,31 +289,8 @@ def _async_bind_runtime(hass: HomeAssistant, runtime: AccountRuntime) -> None:
         entry = hass.config_entries.async_get_entry(min(runtime.entries))
 
         if entry is not None:
-            _async_create_issue(hass, entry, ISSUE_ACCOUNT_STATE)
+            async_create_issue(hass, entry, ISSUE_ACCOUNT_STATE)
 
     coordinator.async_request_reauth = request_reauth
     coordinator.async_report_missing_patients = report_missing_patients
     coordinator.async_report_account_state = report_account_state
-
-
-@callback
-def _async_create_issue(hass: HomeAssistant, entry: ConfigEntry, kind: str) -> None:
-    """Raise a repair issue for one config entry.
-
-    The entry title is the only placeholder: it is a Home Assistant reference the
-    user recognizes, unlike a patient ID, which must never be persisted here.
-    """
-    ir.async_create_issue(
-        hass,
-        DOMAIN,
-        _issue_id(kind, entry.entry_id),
-        is_fixable=False,
-        severity=ir.IssueSeverity.WARNING,
-        translation_key=kind,
-        translation_placeholders={"entry_title": entry.title},
-    )
-
-
-@callback
-def _async_delete_issue(hass: HomeAssistant, entry_id: str, kind: str) -> None:
-    ir.async_delete_issue(hass, DOMAIN, _issue_id(kind, entry_id))

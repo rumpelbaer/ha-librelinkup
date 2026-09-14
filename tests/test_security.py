@@ -179,10 +179,49 @@ def test_diagnostics_never_read_the_snapshot_itself() -> None:
 
 
 def test_repair_issue_ids_are_keyed_by_config_entry() -> None:
-    source = (COMPONENT_DIR / "__init__.py").read_text(encoding="utf-8")
+    """Repair issues are persisted in .storage, so their ID must name no person.
 
-    assert "def _issue_id(kind: str, entry_id: str)" in source
-    # No call site may key an issue by anything else.
-    assert "_issue_id(kind, entry.entry_id)" in source
-    assert "_issue_id(kind, entry_id)" in source
-    assert "_issue_id(kind, patient" not in source
+    Checked across every source file rather than in one of them by name: which
+    module holds the helper is a structural detail, that nothing but a config
+    entry ID ever keys an issue is the invariant.
+    """
+    definitions = []
+    calls = []
+
+    for path, tree in _parsed():
+        for node in ast.walk(tree):
+            if isinstance(node, ast.FunctionDef) and node.name == "_issue_id":
+                definitions.append((path, node))
+
+            if (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Name)
+                and node.func.id == "_issue_id"
+            ):
+                calls.append((path, node))
+
+    # One definition, taking the kind and a config entry ID and nothing else.
+    assert len(definitions) == 1, f"_issue_id defined {len(definitions)} times"
+    _, definition = definitions[0]
+    assert [argument.arg for argument in definition.args.args] == [
+        "kind",
+        "entry_id",
+    ]
+
+    # And every call site keys the issue by exactly that.
+    assert calls
+
+    for path, call in calls:
+        assert len(call.args) == 2 and not call.keywords
+
+        names = {
+            node.id for node in ast.walk(call.args[1]) if isinstance(node, ast.Name)
+        } | {
+            node.attr
+            for node in ast.walk(call.args[1])
+            if isinstance(node, ast.Attribute)
+        }
+
+        assert names <= {"entry", "entry_id"}, (
+            f"{path.name}:{call.lineno}: issue ID keyed by {names}"
+        )

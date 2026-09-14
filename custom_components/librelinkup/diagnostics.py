@@ -19,9 +19,9 @@ from typing import Any
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 
-from . import AccountRuntime, account_key
 from .const import DOMAIN
 from .coordinator import LibreLinkUpAccountCoordinator
+from .runtime import AccountRuntime, account_key
 
 
 async def async_get_config_entry_diagnostics(
