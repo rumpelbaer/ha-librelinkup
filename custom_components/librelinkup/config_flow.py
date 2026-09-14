@@ -9,11 +9,15 @@ from homeassistant.data_entry_flow import FlowResult
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 from .api import LibreLinkUpApi, LibreLinkUpAuthenticationError
-from .const import DOMAIN
+from .const import CONF_PATIENT_ID, CONF_PATIENT_NAME, DOMAIN
 
 
 class LibreLinkUpConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     VERSION = 1
+
+    def __init__(self) -> None:
+        self._pending_credentials: dict | None = None
+        self._connections: dict[str, str] = {}
 
     async def async_step_user(self, user_input: dict | None = None) -> FlowResult:
         errors: dict[str, str] = {}
@@ -40,17 +44,22 @@ class LibreLinkUpConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             else:
                 if not connections:
                     errors["base"] = "no_connections"
-                else:
-                    await self.async_set_unique_id(email)
-                    self._abort_if_unique_id_configured()
-
-                    return self.async_create_entry(
-                        title="LibreLinkUp",
-                        data={
-                            CONF_EMAIL: email,
-                            CONF_PASSWORD: password,
-                        },
+                elif len(connections) == 1:
+                    return await self._async_create_entry(
+                        email,
+                        password,
+                        connections[0],
                     )
+                else:
+                    self._pending_credentials = {
+                        CONF_EMAIL: email,
+                        CONF_PASSWORD: password,
+                    }
+                    self._connections = {
+                        connection["patientId"]: self._connection_name(connection)
+                        for connection in connections
+                    }
+                    return await self.async_step_connection()
 
         schema = vol.Schema(
             {
@@ -64,3 +73,70 @@ class LibreLinkUpConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             data_schema=schema,
             errors=errors,
         )
+
+    async def async_step_connection(
+        self,
+        user_input: dict | None = None,
+    ) -> FlowResult:
+        if user_input is not None:
+            patient_id = user_input[CONF_PATIENT_ID]
+
+            connection = {
+                "patientId": patient_id,
+                "firstName": self._connections[patient_id],
+                "lastName": "",
+            }
+
+            assert self._pending_credentials is not None
+
+            return await self._async_create_entry(
+                self._pending_credentials[CONF_EMAIL],
+                self._pending_credentials[CONF_PASSWORD],
+                connection,
+                patient_name=self._connections[patient_id],
+            )
+
+        return self.async_show_form(
+            step_id="connection",
+            data_schema=vol.Schema(
+                {
+                    vol.Required(CONF_PATIENT_ID): vol.In(self._connections),
+                }
+            ),
+        )
+
+    async def _async_create_entry(
+        self,
+        email: str,
+        password: str,
+        connection: dict,
+        patient_name: str | None = None,
+    ) -> FlowResult:
+        await self.async_set_unique_id(email)
+        self._abort_if_unique_id_configured()
+
+        patient_id = connection["patientId"]
+        name = patient_name or self._connection_name(connection)
+
+        return self.async_create_entry(
+            title=f"LibreLinkUp - {name}",
+            data={
+                CONF_EMAIL: email,
+                CONF_PASSWORD: password,
+                CONF_PATIENT_ID: patient_id,
+                CONF_PATIENT_NAME: name,
+            },
+        )
+
+    @staticmethod
+    def _connection_name(connection: dict) -> str:
+        name = " ".join(
+            part
+            for part in (
+                connection.get("firstName"),
+                connection.get("lastName"),
+            )
+            if part
+        ).strip()
+
+        return name or connection.get("patientId", "LibreLinkUp")

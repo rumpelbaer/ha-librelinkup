@@ -8,6 +8,13 @@
           "email": "E-Mail",
           "password": "Passwort"
         }
+      },
+      "connection": {
+        "title": "LibreLinkUp-Verbindung auswählen",
+        "description": "Dieses LibreLinkUp-Konto hat Zugriff auf mehrere Personen. Wähle die Person aus, deren Glukosedaten verwendet werden sollen.",
+        "data": {
+          "patient_id": "Person"
+        }
       }
     },
     "error": {

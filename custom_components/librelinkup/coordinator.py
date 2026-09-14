@@ -9,6 +9,7 @@ from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
 from .api import LibreLinkUpApi
+from .const import CONF_PATIENT_ID
 
 
 class LibreLinkUpCoordinator(DataUpdateCoordinator[dict]):
@@ -26,7 +27,7 @@ class LibreLinkUpCoordinator(DataUpdateCoordinator[dict]):
             entry.data[CONF_EMAIL],
             entry.data[CONF_PASSWORD],
         )
-        self.patient_id: str | None = None
+        self.patient_id: str | None = entry.data.get(CONF_PATIENT_ID)
 
     async def _async_update_data(self) -> dict:
         try:
