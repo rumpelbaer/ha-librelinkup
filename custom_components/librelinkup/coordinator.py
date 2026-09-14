@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from datetime import timedelta
 
 from homeassistant.config_entries import ConfigEntry
@@ -11,22 +12,26 @@ from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, Upda
 from .api import LibreLinkUpApi
 from .const import CONF_PATIENT_ID
 
+_LOGGER = logging.getLogger(__name__)
+
 
 class LibreLinkUpCoordinator(DataUpdateCoordinator[dict]):
     def __init__(self, hass: HomeAssistant, entry: ConfigEntry) -> None:
         super().__init__(
             hass,
-            logger=__import__("logging").getLogger(__name__),
+            logger=_LOGGER,
             name="LibreLinkUp",
             update_interval=timedelta(seconds=60),
         )
 
         session = async_get_clientsession(hass)
+
         self.api = LibreLinkUpApi(
             session,
             entry.data[CONF_EMAIL],
             entry.data[CONF_PASSWORD],
         )
+
         self.patient_id: str | None = entry.data.get(CONF_PATIENT_ID)
 
     async def _async_update_data(self) -> dict:
@@ -36,11 +41,29 @@ class LibreLinkUpCoordinator(DataUpdateCoordinator[dict]):
                 connections = await self.api.async_get_connections()
 
                 if not connections:
-                    raise UpdateFailed("No LibreLinkUp connections found")
+                    raise RuntimeError("No LibreLinkUp connections found")
 
                 self.patient_id = connections[0]["patientId"]
 
-            return await self.api.async_get_glucose_measurement(self.patient_id)
+            measurement = await self.api.async_get_glucose_measurement(
+                self.patient_id
+            )
+
+            if not measurement:
+                raise RuntimeError(
+                    "LibreLinkUp returned no glucose measurement"
+                )
+
+            return measurement
 
         except Exception as err:
-            raise UpdateFailed(f"LibreLinkUp update failed: {err}") from err
+            if self.data:
+                _LOGGER.warning(
+                    "LibreLinkUp update failed (%s); keeping the last valid measurement",
+                    type(err).__name__,
+                )
+                return self.data
+
+            raise UpdateFailed(
+                "LibreLinkUp initial data update failed"
+            ) from err
