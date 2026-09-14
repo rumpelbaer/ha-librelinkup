@@ -121,6 +121,15 @@ class LibreLinkUpAccountCoordinator(DataUpdateCoordinator[dict[str, dict]]):
         self._failure_label: str | None = None
         self._server_error_count = 0
 
+        # The two things that decide how often this account is polled, kept
+        # apart because they answer different questions: whether the user
+        # allows automatic polling at all, and whether the server currently
+        # wants to be left alone. update_interval is derived from both by
+        # _apply_interval and is never written anywhere else -- that is what
+        # keeps a backoff from switching polling back on.
+        self._polling_enabled = True
+        self._backoff: timedelta | None = None
+
         # The patients Home Assistant has a config entry for. Everything else
         # the account shares is dropped on arrival.
         self._patients: frozenset[str] = frozenset()
@@ -169,28 +178,38 @@ class LibreLinkUpAccountCoordinator(DataUpdateCoordinator[dict[str, dict]]):
         entries allows it, and stops automatic polling once every entry opted
         out. Manual refreshes keep working either way.
         """
-        if not enabled:
-            if self.update_interval is None:
-                return
-
-            self.update_interval = None
-
-            if self.data is not None and self.last_update_success:
-                # Cancels the pending refresh; with no interval left to schedule
-                # it is not armed again.
-                self.async_set_updated_data(self.data)
-
+        if enabled == self._polling_enabled:
+            # Nothing changed -- and a running backoff stays intact. Recomputed
+            # on every setup and unload, so this is the common case.
             return
 
-        if self.update_interval is not None:
-            # Already polling -- and a running backoff interval stays intact.
-            return
+        self._polling_enabled = enabled
 
-        self.update_interval = DEFAULT_UPDATE_INTERVAL
+        if enabled:
+            # A pause is not a backoff that keeps running underneath it:
+            # resuming starts from the normal interval, as it always has.
+            self._backoff = None
+
+        self._apply_interval()
 
         if self.data is not None and self.last_update_success:
-            # Re-arms the timer with the restored interval.
+            # Switching off cancels the pending refresh and, with no interval
+            # left to schedule, does not arm it again; switching on re-arms it
+            # with the restored interval.
             self.async_set_updated_data(self.data)
+
+    def _apply_interval(self) -> None:
+        """Derive the interval Home Assistant schedules on from both states.
+
+        The only place update_interval is ever written. A backoff therefore
+        cannot switch automatic polling back on: while the user has it off,
+        _backoff may well be set, and the answer here is still None.
+        """
+        self.update_interval = (
+            (self._backoff or DEFAULT_UPDATE_INTERVAL)
+            if self._polling_enabled
+            else None
+        )
 
     def measurement_for(self, patient_id: str) -> dict | None:
         """The latest known measurement of exactly this patient."""
@@ -268,21 +287,44 @@ class LibreLinkUpAccountCoordinator(DataUpdateCoordinator[dict[str, dict]]):
         return self._handle_success(measurements)
 
     def _handle_success(self, measurements: dict[str, dict | None]) -> dict[str, dict]:
-        now = dt_util.utcnow()
+        """The account level of a successful poll.
 
-        self._last_successful_update = now
+        Everything here is true of the account as a whole -- it recovered, it
+        may go back to its normal rhythm, it has no state problem to report.
+        What each configured patient makes of the response is _build_snapshot's
+        business.
+        """
+        self._last_successful_update = dt_util.utcnow()
         self._server_error_count = 0
         self._report_account_state(False)
 
-        if self.update_interval not in (None, DEFAULT_UPDATE_INTERVAL):
-            # Back to normal after a backoff. "is None" is left alone: that is
-            # polling being switched off by the user, not a backoff.
-            self.update_interval = DEFAULT_UPDATE_INTERVAL
+        # Back to normal after a backoff. Polling the user switched off stays
+        # off: _apply_interval decides that, not this.
+        self._backoff = None
+        self._apply_interval()
 
         if self._failure_label is not None:
             _LOGGER.info("LibreLinkUp updates recovered")
             self._failure_label = None
 
+        snapshot, missing = self._build_snapshot(measurements)
+
+        if self.async_report_missing_patients is not None:
+            self.async_report_missing_patients(missing)
+
+        return snapshot
+
+    def _build_snapshot(
+        self, measurements: dict[str, dict | None]
+    ) -> tuple[dict[str, dict], frozenset[str]]:
+        """What the configured patients make of one response.
+
+        Returns their readings and the ones the account no longer shares at
+        all. Everything patient-scoped happens here, including the per-patient
+        log guards: _measured_at is only ever written next to the snapshot
+        entry it belongs to, so availability can never be decided from a
+        timestamp whose reading is gone.
+        """
         # Start from what we already knew, restricted to configured patients: a
         # patient who is momentarily without a reading keeps their previous one
         # until its own age limit is reached.
@@ -319,10 +361,7 @@ class LibreLinkUpAccountCoordinator(DataUpdateCoordinator[dict[str, dict]]):
             self._measured_at[patient_id] = measured_at
             self._patient_problem_logged.discard(patient_id)
 
-        if self.async_report_missing_patients is not None:
-            self.async_report_missing_patients(frozenset(missing))
-
-        return snapshot
+        return snapshot, frozenset(missing)
 
     def _handle_failure(self, err: Exception) -> dict[str, dict]:
         label = _error_label(err)
@@ -374,10 +413,8 @@ class LibreLinkUpAccountCoordinator(DataUpdateCoordinator[dict[str, dict]]):
         else:
             return None
 
-        if self.update_interval is not None:
-            # Never through the "polling disabled" state: a backoff must not
-            # switch automatic polling back on.
-            self.update_interval = delay
+        self._backoff = delay
+        self._apply_interval()
 
         return delay
 

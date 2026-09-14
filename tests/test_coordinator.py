@@ -273,6 +273,26 @@ async def test_interval_returns_to_normal_after_rate_limit(coordinator) -> None:
     assert coordinator.update_interval == DEFAULT_UPDATE_INTERVAL
 
 
+async def test_resuming_polling_does_not_inherit_a_backoff(coordinator) -> None:
+    """A rate limit met while polling was off must not outlive the pause.
+
+    Manual refreshes keep working with automatic polling switched off, so the
+    account can be told to back off at a point where nothing is scheduled to
+    back off from. Turning polling back on resumes at the normal interval; the
+    next real failure may slow it down again.
+    """
+    coordinator.async_set_polling_enabled(False)
+    with_previous_success(coordinator, minutes_ago=1)
+    fail_with(coordinator, http_error(429, retry_after="300"))
+    await coordinator._async_update_data()
+
+    assert coordinator.update_interval is None
+
+    coordinator.async_set_polling_enabled(True)
+
+    assert coordinator.update_interval == DEFAULT_UPDATE_INTERVAL
+
+
 # --- H2: server error backoff ------------------------------------------------
 
 
