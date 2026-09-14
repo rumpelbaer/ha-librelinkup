@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import ast
+import inspect
+import locale
 from datetime import UTC, datetime
 from unittest.mock import MagicMock
 
@@ -16,7 +19,11 @@ from custom_components.librelinkup.sensor import (
     LibreLinkUpReadingAgeSensor,
     LibreLinkUpTrendSensor,
 )
-from custom_components.librelinkup.utils import mg_dl_to_mmol_l
+from custom_components.librelinkup import utils
+from custom_components.librelinkup.utils import (
+    mg_dl_to_mmol_l,
+    parse_libre_timestamp,
+)
 
 
 class FakeCoordinator:
@@ -278,3 +285,118 @@ def test_data_stale(monkeypatch) -> None:
     )
 
     assert sensor.is_on is True
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        # Verified LibreLinkUp format: M/D/YYYY h:mm:ss AM/PM, always UTC.
+        ("9/14/2026 11:12:35 AM", datetime(2026, 9, 14, 11, 12, 35, tzinfo=UTC)),
+        ("9/14/2026 11:12:35 PM", datetime(2026, 9, 14, 23, 12, 35, tzinfo=UTC)),
+        # Midnight and noon are the two cases a hand-rolled parser gets wrong.
+        ("9/14/2026 12:05:00 AM", datetime(2026, 9, 14, 0, 5, 0, tzinfo=UTC)),
+        ("9/14/2026 12:05:00 PM", datetime(2026, 9, 14, 12, 5, 0, tzinfo=UTC)),
+        ("9/14/2026 12:59:59 PM", datetime(2026, 9, 14, 12, 59, 59, tzinfo=UTC)),
+        ("1/1/2026 1:00:00 AM", datetime(2026, 1, 1, 1, 0, 0, tzinfo=UTC)),
+        ("12/31/2026 11:59:59 PM", datetime(2026, 12, 31, 23, 59, 59, tzinfo=UTC)),
+        # Zero-padded and lower-case variants must keep working.
+        ("09/14/2026 09:12:35 am", datetime(2026, 9, 14, 9, 12, 35, tzinfo=UTC)),
+    ],
+)
+def test_parse_libre_timestamp_valid(raw, expected) -> None:
+    assert parse_libre_timestamp(raw) == expected
+
+
+def test_parse_libre_timestamp_is_utc_aware() -> None:
+    parsed = parse_libre_timestamp("9/14/2026 11:12:35 AM")
+
+    assert parsed is not None
+    assert parsed.tzinfo is UTC
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        None,
+        "",
+        "   ",
+        "invalid",
+        "9/14/2026 25:61:99 PM",  # hour/minute/second out of range
+        "9/14/2026 13:12:35 PM",  # 13 is not a valid 12-hour clock hour
+        "9/14/2026 00:12:35 AM",  # neither is 0
+        "2/30/2026 11:12:35 AM",  # February 30th does not exist
+        "9/14/2026 11:12:35",  # meridiem missing
+        "9/14/2026 11:12 AM",  # seconds missing
+        "9/14/26 11:12:35 AM",  # two-digit year
+        "9/14/2026 11:12:35 XM",  # bogus meridiem
+        "9/14/2026 11:12:35 AM extra",  # trailing garbage
+    ],
+)
+def test_parse_libre_timestamp_invalid(raw) -> None:
+    assert parse_libre_timestamp(raw) is None
+
+
+def test_parse_libre_timestamp_does_not_call_strptime() -> None:
+    """Guard against reintroducing the locale-dependent %p directive.
+
+    Checked on the AST so that the explanatory comment mentioning %p does not
+    make this pass or fail for the wrong reason.
+    """
+    tree = ast.parse(inspect.getsource(utils))
+
+    called = {
+        node.func.attr
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+    }
+
+    assert "strptime" not in called
+
+
+@pytest.fixture
+def german_lc_time():
+    """Temporarily switch LC_TIME to German, restoring it afterwards."""
+    previous = locale.setlocale(locale.LC_TIME)
+
+    for candidate in ("de_DE.UTF-8", "de_DE.utf8", "de_DE"):
+        try:
+            locale.setlocale(locale.LC_TIME, candidate)
+        except locale.Error:
+            continue
+        break
+    else:
+        pytest.skip("No German locale available on this system")
+
+    try:
+        yield
+    finally:
+        locale.setlocale(locale.LC_TIME, previous)
+
+
+def test_parse_libre_timestamp_is_locale_independent(german_lc_time) -> None:
+    """Regression test for the %p/LC_TIME failure.
+
+    Under a German LC_TIME the AM/PM list is empty, so strptime("%p") rejects
+    every LibreLinkUp timestamp. That silently broke Last Reading, Reading Age
+    and pinned Data Stale to "problem".
+    """
+    assert parse_libre_timestamp("9/14/2026 11:12:35 PM") == datetime(
+        2026, 9, 14, 23, 12, 35, tzinfo=UTC
+    )
+    assert parse_libre_timestamp("9/14/2026 11:12:35 AM") == datetime(
+        2026, 9, 14, 11, 12, 35, tzinfo=UTC
+    )
+    assert parse_libre_timestamp("9/14/2026 12:05:00 AM") == datetime(
+        2026, 9, 14, 0, 5, 0, tzinfo=UTC
+    )
+
+
+def test_entities_parse_pm_timestamps(german_lc_time) -> None:
+    """The entities must stay wired to the locale-independent parser."""
+    coordinator = FakeCoordinator({"FactoryTimestamp": "9/14/2026 1:12:35 PM"})
+
+    assert LibreLinkUpLastReadingSensor(coordinator, make_entry()).native_value == (
+        datetime(2026, 9, 14, 13, 12, 35, tzinfo=UTC)
+    )
+    assert LibreLinkUpReadingAgeSensor(coordinator, make_entry()).native_value is not None
+    assert LibreLinkUpDataStaleSensor(coordinator, make_entry()).is_on is True

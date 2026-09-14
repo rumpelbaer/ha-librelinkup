@@ -1,21 +1,58 @@
 from __future__ import annotations
 
+import re
 from datetime import UTC, datetime
 from math import isfinite
 
 
 MG_DL_PER_MMOL_L = 18.0182
 
+# LibreLinkUp reports "FactoryTimestamp" as "M/D/YYYY h:mm:ss AM/PM" in UTC.
+# Parsed by hand instead of strptime("%p"), because %p resolves AM/PM through
+# LC_TIME: under a German locale the meridiem list is empty and every timestamp
+# would silently fail to parse.
+LIBRE_TIMESTAMP_PATTERN = re.compile(
+    r"(?P<month>\d{1,2})/(?P<day>\d{1,2})/(?P<year>\d{4})\s+"
+    r"(?P<hour>\d{1,2}):(?P<minute>\d{2}):(?P<second>\d{2})\s+"
+    r"(?P<meridiem>[AP])M",
+    re.IGNORECASE,
+)
+
 
 def parse_libre_timestamp(value: str | None) -> datetime | None:
+    """Parse a LibreLinkUp UTC timestamp, locale-independently.
+
+    Returns ``None`` for anything that is not a well-formed timestamp, so that
+    malformed API data never raises into the entity layer.
+    """
     if not value:
         return None
 
+    match = LIBRE_TIMESTAMP_PATTERN.fullmatch(value.strip())
+
+    if match is None:
+        return None
+
+    hour = int(match["hour"])
+
+    if not 1 <= hour <= 12:
+        return None
+
+    hour %= 12
+
+    if match["meridiem"].upper() == "P":
+        hour += 12
+
     try:
-        return datetime.strptime(
-            value,
-            "%m/%d/%Y %I:%M:%S %p",
-        ).replace(tzinfo=UTC)
+        return datetime(
+            int(match["year"]),
+            int(match["month"]),
+            int(match["day"]),
+            hour,
+            int(match["minute"]),
+            int(match["second"]),
+            tzinfo=UTC,
+        )
     except ValueError:
         return None
 
