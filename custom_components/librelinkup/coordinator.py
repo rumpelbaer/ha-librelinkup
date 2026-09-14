@@ -196,9 +196,19 @@ class LibreLinkUpAccountCoordinator(DataUpdateCoordinator[dict[str, dict]]):
         """The latest known measurement of exactly this patient."""
         return (self.data or {}).get(patient_id)
 
+    def measured_at_for(self, patient_id: str) -> datetime | None:
+        """When exactly this patient's latest known measurement was taken.
+
+        Returns what was derived from FactoryTimestamp when the reading
+        arrived; it never parses or recomputes anything. This is the same
+        value the freshness rules below run on, so the entity layer cannot
+        drift apart from availability by deriving its own.
+        """
+        return self._measured_at.get(patient_id)
+
     def is_patient_available(self, patient_id: str) -> bool:
         """Whether this patient's own measurement is recent enough to serve."""
-        measured_at = self._measured_at.get(patient_id)
+        measured_at = self.measured_at_for(patient_id)
 
         if measured_at is None:
             return False

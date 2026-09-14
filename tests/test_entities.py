@@ -40,6 +40,12 @@ class FakeCoordinator:
     def measurement_for(self, patient_id):
         return self.data.get(patient_id)
 
+    def measured_at_for(self, patient_id):
+        """Mirrors the real coordinator: derived once, when the reading lands."""
+        measurement = self.data.get(patient_id) or {}
+
+        return parse_libre_timestamp(measurement.get("FactoryTimestamp"))
+
     def is_patient_available(self, patient_id) -> bool:
         return patient_id in self.data
 
@@ -52,6 +58,44 @@ def make_entry(patient_id: str = PATIENT_ID):
     entry.entry_id = "test-entry"
     entry.data = {"patient_id": patient_id}
     return entry
+
+
+def test_unique_id_suffixes_are_frozen() -> None:
+    """The seven unique IDs, spelled out as they exist in the wild.
+
+    Every one of them is an entity registry key of every installation that has
+    ever run this integration. A changed suffix does not fail anywhere at
+    runtime: Home Assistant simply registers a new entity and the old one, with
+    all of its history, is orphaned.
+
+    Written out literally instead of being built from _entity_key, so that a
+    refactor of the entity classes cannot quietly move the expectation along
+    with the code it is supposed to pin down.
+    """
+    coordinator = FakeCoordinator({})
+    entry = make_entry()
+
+    entities = (
+        LibreLinkUpGlucoseSensor(coordinator, entry),
+        LibreLinkUpTrendSensor(coordinator, entry),
+        LibreLinkUpLastReadingSensor(coordinator, entry),
+        LibreLinkUpReadingAgeSensor(coordinator, entry),
+        LibreLinkUpDataStaleSensor(coordinator, entry),
+        LibreLinkUpLowSensor(coordinator, entry),
+        LibreLinkUpHighSensor(coordinator, entry),
+    )
+
+    assert {
+        type(entity).__name__: entity.unique_id for entity in entities
+    } == {
+        "LibreLinkUpGlucoseSensor": "test-entry_glucose",
+        "LibreLinkUpTrendSensor": "test-entry_trend",
+        "LibreLinkUpLastReadingSensor": "test-entry_last_reading",
+        "LibreLinkUpReadingAgeSensor": "test-entry_reading_age",
+        "LibreLinkUpDataStaleSensor": "test-entry_data_stale",
+        "LibreLinkUpLowSensor": "test-entry_low",
+        "LibreLinkUpHighSensor": "test-entry_high",
+    }
 
 
 def test_glucose_sensor() -> None:

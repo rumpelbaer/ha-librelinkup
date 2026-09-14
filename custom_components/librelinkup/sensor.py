@@ -8,13 +8,11 @@ from homeassistant.const import UnitOfBloodGlucoseConcentration, UnitOfTime
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity import EntityCategory
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
-from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from homeassistant.util import dt as dt_util
 
-from .const import CONF_PATIENT_ID
 from .coordinator import LibreLinkUpAccountCoordinator
-from .entity import build_device_info
-from .utils import mg_dl_to_mmol_l, parse_libre_timestamp
+from .entity import LibreLinkUpPatientEntity
+from .utils import mg_dl_to_mmol_l
 
 
 TREND_MAP = {
@@ -68,48 +66,14 @@ async def async_setup_entry(
     )
 
 
-class LibreLinkUpSensorBase(
-    CoordinatorEntity[LibreLinkUpAccountCoordinator],
-    SensorEntity,
-):
-    _attr_has_entity_name = True
-
-    def __init__(
-        self,
-        coordinator: LibreLinkUpAccountCoordinator,
-        entry: ConfigEntry,
-    ) -> None:
-        super().__init__(coordinator)
-        self._patient_id: str = entry.data[CONF_PATIENT_ID]
-        self._attr_device_info = build_device_info(entry)
-
-    @property
-    def _measurement(self) -> dict:
-        """This entry's patient only -- never the whole account snapshot."""
-        return self.coordinator.measurement_for(self._patient_id) or {}
-
-    @property
-    def available(self) -> bool:
-        return super().available and self.coordinator.is_patient_available(
-            self._patient_id
-        )
-
-
-class LibreLinkUpGlucoseSensor(LibreLinkUpSensorBase):
+class LibreLinkUpGlucoseSensor(LibreLinkUpPatientEntity, SensorEntity):
+    _entity_key = "glucose"
     _attr_name = "Glucose"
     _attr_device_class = SensorDeviceClass.BLOOD_GLUCOSE_CONCENTRATION
     _attr_native_unit_of_measurement = (
         UnitOfBloodGlucoseConcentration.MILLIMOLE_PER_LITER
     )
     _attr_state_class = SensorStateClass.MEASUREMENT
-
-    def __init__(
-        self,
-        coordinator: LibreLinkUpAccountCoordinator,
-        entry: ConfigEntry,
-    ) -> None:
-        super().__init__(coordinator, entry)
-        self._attr_unique_id = f"{entry.entry_id}_glucose"
 
     @property
     def native_value(self) -> float | None:
@@ -129,18 +93,11 @@ class LibreLinkUpGlucoseSensor(LibreLinkUpSensorBase):
         return {"glucose_mg_dl": self._measurement.get("ValueInMgPerDl")}
 
 
-class LibreLinkUpTrendSensor(LibreLinkUpSensorBase):
+class LibreLinkUpTrendSensor(LibreLinkUpPatientEntity, SensorEntity):
+    _entity_key = "trend"
     _attr_name = "Trend"
     _attr_device_class = SensorDeviceClass.ENUM
     _attr_options = ["not_determined", "falling_rapidly", "falling", "stable", "rising", "rising_rapidly"]
-
-    def __init__(
-        self,
-        coordinator: LibreLinkUpAccountCoordinator,
-        entry: ConfigEntry,
-    ) -> None:
-        super().__init__(coordinator, entry)
-        self._attr_unique_id = f"{entry.entry_id}_trend"
 
     @property
     def native_value(self) -> str | None:
@@ -157,27 +114,19 @@ class LibreLinkUpTrendSensor(LibreLinkUpSensorBase):
         }
 
 
-class LibreLinkUpLastReadingSensor(LibreLinkUpSensorBase):
+class LibreLinkUpLastReadingSensor(LibreLinkUpPatientEntity, SensorEntity):
+    _entity_key = "last_reading"
     _attr_name = "Last Reading"
     _attr_entity_category = EntityCategory.DIAGNOSTIC
     _attr_device_class = SensorDeviceClass.TIMESTAMP
 
-    def __init__(
-        self,
-        coordinator: LibreLinkUpAccountCoordinator,
-        entry: ConfigEntry,
-    ) -> None:
-        super().__init__(coordinator, entry)
-        self._attr_unique_id = f"{entry.entry_id}_last_reading"
-
     @property
     def native_value(self) -> datetime | None:
-        return parse_libre_timestamp(
-            self._measurement.get("FactoryTimestamp")
-        )
+        return self._measured_at
 
 
-class LibreLinkUpReadingAgeSensor(LibreLinkUpSensorBase):
+class LibreLinkUpReadingAgeSensor(LibreLinkUpPatientEntity, SensorEntity):
+    _entity_key = "reading_age"
     _attr_name = "Reading Age"
     _attr_entity_category = EntityCategory.DIAGNOSTIC
     _attr_native_unit_of_measurement = UnitOfTime.MINUTES
@@ -187,19 +136,9 @@ class LibreLinkUpReadingAgeSensor(LibreLinkUpSensorBase):
     # the reading" carry no information worth keeping.
     _attr_entity_registry_enabled_default = False
 
-    def __init__(
-        self,
-        coordinator: LibreLinkUpAccountCoordinator,
-        entry: ConfigEntry,
-    ) -> None:
-        super().__init__(coordinator, entry)
-        self._attr_unique_id = f"{entry.entry_id}_reading_age"
-
     @property
     def native_value(self) -> int | None:
-        measured_at = parse_libre_timestamp(
-            self._measurement.get("FactoryTimestamp")
-        )
+        measured_at = self._measured_at
 
         if measured_at is None:
             return None
