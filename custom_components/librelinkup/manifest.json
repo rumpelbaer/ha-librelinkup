@@ -1,0 +1,9 @@
+{
+  "domain": "librelinkup",
+  "name": "LibreLinkUp",
+  "version": "0.1.0",
+  "documentation": "https://github.com/rumpelbaer/ha-librelinkup",
+  "codeowners": ["@rumpelbaer"],
+  "iot_class": "cloud_polling",
+  "config_flow": true
+}

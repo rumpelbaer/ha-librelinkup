@@ -1,0 +1,2 @@
+DOMAIN = "librelinkup"
+PLATFORMS = ["sensor"]
