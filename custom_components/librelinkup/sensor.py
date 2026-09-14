@@ -26,7 +26,7 @@ class LibreLinkUpGlucoseSensor(
 ):
     _attr_name = "LibreLinkUp Glucose"
     _attr_device_class = SensorDeviceClass.BLOOD_GLUCOSE_CONCENTRATION
-    _attr_native_unit_of_measurement = UnitOfBloodGlucoseConcentration.MILLIGRAMS_PER_DECILITER
+    _attr_native_unit_of_measurement = UnitOfBloodGlucoseConcentration.MILLIMOLE_PER_LITER
 
     def __init__(
         self,
@@ -37,15 +37,16 @@ class LibreLinkUpGlucoseSensor(
         self._attr_unique_id = f"{entry.entry_id}_glucose"
 
     @property
-    def native_value(self) -> int | None:
-        value = self.coordinator.data.get("ValueInMgPerDl")
-        return int(value) if value is not None else None
+    def native_value(self) -> float | None:
+        value = self.coordinator.data.get("Value")
+        return float(value) if value is not None else None
 
     @property
     def extra_state_attributes(self) -> dict:
         data = self.coordinator.data
         return {
-            "value_mmol_l": data.get("Value"),
+            "glucose_mmol_l": data.get("Value"),
+            "glucose_mg_dl": data.get("ValueInMgPerDl"),
             "trend_arrow": data.get("TrendArrow"),
             "timestamp": data.get("Timestamp"),
             "factory_timestamp": data.get("FactoryTimestamp"),
