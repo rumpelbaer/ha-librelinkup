@@ -3,6 +3,8 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from unittest.mock import MagicMock
 
+import pytest
+
 from custom_components.librelinkup.binary_sensor import (
     LibreLinkUpDataStaleSensor,
     LibreLinkUpHighSensor,
@@ -14,6 +16,7 @@ from custom_components.librelinkup.sensor import (
     LibreLinkUpReadingAgeSensor,
     LibreLinkUpTrendSensor,
 )
+from custom_components.librelinkup.utils import mg_dl_to_mmol_l
 
 
 class FakeCoordinator:
@@ -50,6 +53,108 @@ def test_glucose_sensor() -> None:
     assert sensor.native_value == 13.7
     assert sensor.extra_state_attributes["glucose_mmol_l"] == 13.7
     assert sensor.extra_state_attributes["glucose_mg_dl"] == 247
+
+
+def test_glucose_sensor_converts_from_mg_dl_on_mmol_account() -> None:
+    """An mmol/L account reports Value in mmol/L; the state must still come
+    from ValueInMgPerDl."""
+    coordinator = FakeCoordinator(
+        {
+            "Value": 13.7,
+            "ValueInMgPerDl": 247,
+            "GlucoseUnits": 0,
+        }
+    )
+
+    sensor = LibreLinkUpGlucoseSensor(coordinator, make_entry())
+
+    assert sensor.native_value == 13.7
+    assert sensor.native_unit_of_measurement == "mmol/L"
+    assert sensor.extra_state_attributes["glucose_mmol_l"] == 13.7
+    assert sensor.extra_state_attributes["glucose_mg_dl"] == 247
+
+
+def test_glucose_sensor_converts_from_mg_dl_on_mg_dl_account() -> None:
+    """Regression test for the mg/dL account case.
+
+    A mg/dL account reports Value in mg/dL. Using it directly would publish
+    247 mmol/L, which would never trigger a low alert and would permanently
+    read as very high.
+    """
+    coordinator = FakeCoordinator(
+        {
+            "Value": 247,
+            "ValueInMgPerDl": 247,
+        }
+    )
+
+    sensor = LibreLinkUpGlucoseSensor(coordinator, make_entry())
+
+    assert sensor.native_value == 13.7
+    assert sensor.native_value != 247
+    assert sensor.native_unit_of_measurement == "mmol/L"
+    assert sensor.extra_state_attributes["glucose_mmol_l"] == 13.7
+
+
+def test_glucose_sensor_native_state_ignores_value_field() -> None:
+    """Even a wildly inconsistent Value must not influence the state."""
+    coordinator = FakeCoordinator(
+        {
+            "Value": 999,
+            "ValueInMgPerDl": 115,
+        }
+    )
+
+    sensor = LibreLinkUpGlucoseSensor(coordinator, make_entry())
+
+    assert sensor.native_value == 6.4
+    assert sensor.extra_state_attributes["glucose_mmol_l"] == 6.4
+
+
+@pytest.mark.parametrize("raw", [115, 115.0, "115"])
+def test_glucose_sensor_accepts_numeric_types(raw) -> None:
+    coordinator = FakeCoordinator({"ValueInMgPerDl": raw})
+    sensor = LibreLinkUpGlucoseSensor(coordinator, make_entry())
+
+    assert sensor.native_value == 6.4
+
+
+@pytest.mark.parametrize(
+    "data",
+    [
+        {"ValueInMgPerDl": None},
+        {"ValueInMgPerDl": "invalid"},
+        {"ValueInMgPerDl": ""},
+        {"ValueInMgPerDl": True},
+        {"ValueInMgPerDl": [247]},
+        {"Value": 13.7},
+        {},
+    ],
+)
+def test_glucose_sensor_returns_none_for_invalid_data(data) -> None:
+    coordinator = FakeCoordinator(data)
+    sensor = LibreLinkUpGlucoseSensor(coordinator, make_entry())
+
+    assert sensor.native_value is None
+    assert sensor.extra_state_attributes["glucose_mmol_l"] is None
+
+
+@pytest.mark.parametrize(
+    ("mg_dl", "expected"),
+    [
+        (247, 13.7),
+        (115, 6.4),
+        (72, 4.0),
+        (54, 3.0),
+        (0, 0.0),
+        (None, None),
+        ("invalid", None),
+        (float("nan"), None),
+        (float("inf"), None),
+    ],
+)
+def test_mg_dl_to_mmol_l(mg_dl, expected) -> None:
+    assert mg_dl_to_mmol_l(mg_dl) == expected
 
 
 def test_trend_sensor() -> None:

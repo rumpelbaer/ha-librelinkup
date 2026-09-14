@@ -13,7 +13,7 @@ from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .const import DOMAIN
 from .coordinator import LibreLinkUpCoordinator
-from .utils import parse_libre_timestamp
+from .utils import mg_dl_to_mmol_l, parse_libre_timestamp
 
 
 TREND_MAP = {
@@ -79,16 +79,18 @@ class LibreLinkUpGlucoseSensor(LibreLinkUpSensorBase):
 
     @property
     def native_value(self) -> float | None:
-        value = self.coordinator.data.get("Value")
-        return float(value) if value is not None else None
+        # "Value" follows the unit configured in the LibreLinkUp account and is
+        # therefore ambiguous; "ValueInMgPerDl" is the only unit-explicit field.
+        return mg_dl_to_mmol_l(self.coordinator.data.get("ValueInMgPerDl"))
 
     @property
     def extra_state_attributes(self) -> dict:
         data = self.coordinator.data
+        mg_dl = data.get("ValueInMgPerDl")
 
         return {
-            "glucose_mmol_l": data.get("Value"),
-            "glucose_mg_dl": data.get("ValueInMgPerDl"),
+            "glucose_mmol_l": mg_dl_to_mmol_l(mg_dl),
+            "glucose_mg_dl": mg_dl,
             "trend_arrow": data.get("TrendArrow"),
             "timestamp": data.get("Timestamp"),
             "factory_timestamp": data.get("FactoryTimestamp"),
