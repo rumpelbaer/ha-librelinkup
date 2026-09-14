@@ -223,5 +223,5 @@ something other than Home Assistant.
 
 ## License
 
-No license has been chosen yet. Until one is added, the usual copyright default
-applies and this code is not licensed for reuse.
+This project is licensed under the MIT License. See [LICENSE](LICENSE) for
+details.
