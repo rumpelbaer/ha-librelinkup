@@ -1,0 +1,4 @@
+# Pinned to the versions this integration is developed and verified against.
+# pytest-homeassistant-custom-component pulls in the matching Home Assistant
+# release, so its version decides which Home Assistant the suite runs on.
+pytest-homeassistant-custom-component==0.13.316

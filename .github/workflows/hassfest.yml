@@ -1,0 +1,41 @@
+name: Validate
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+  schedule:
+    # Home Assistant changes its requirements between releases, so validate on a
+    # schedule too, not only when this repository changes.
+    - cron: "0 4 * * 1"
+
+permissions:
+  contents: read
+
+jobs:
+  hassfest:
+    name: hassfest
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v5
+
+      - name: Run hassfest
+        uses: home-assistant/actions/hassfest@master
+
+  hacs:
+    name: HACS
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # The HACS action comments its result on pull requests.
+      pull-requests: write
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v5
+
+      - name: Run HACS validation
+        uses: hacs/action@main
+        with:
+          category: integration
