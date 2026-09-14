@@ -23,12 +23,16 @@ from pytest_homeassistant_custom_component.common import (
 
 from helpers import measurement
 
-from custom_components.librelinkup import DOMAIN, account_key
 from custom_components.librelinkup.api import (
     LibreLinkUpAccountStateError,
     LibreLinkUpAuthenticationError,
 )
-from custom_components.librelinkup.const import CONF_PATIENT_ID, CONF_PATIENT_NAME
+from custom_components.librelinkup.const import (
+    CONF_PATIENT_ID,
+    CONF_PATIENT_NAME,
+    DOMAIN,
+)
+from custom_components.librelinkup.runtime import account_key
 
 EMAIL = "user@example.com"
 

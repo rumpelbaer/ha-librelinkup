@@ -17,10 +17,10 @@ from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from helpers import measurement
 
-from custom_components.librelinkup import DOMAIN, account_key
 from custom_components.librelinkup.const import (
     CONF_PATIENT_ID,
     CONF_PATIENT_NAME,
+    DOMAIN,
     ISSUE_ACCOUNT_STATE,
     ISSUE_LEGACY_ENTRY,
     ISSUE_SHARE_REVOKED,
@@ -28,6 +28,7 @@ from custom_components.librelinkup.const import (
 from custom_components.librelinkup.diagnostics import (
     async_get_config_entry_diagnostics,
 )
+from custom_components.librelinkup.runtime import account_key
 
 EMAIL = "user@example.com"
 PASSWORD = "super-secret-password"

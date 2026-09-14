@@ -201,7 +201,8 @@ class LibreLinkUpAccountCoordinator(DataUpdateCoordinator[dict[str, dict]]):
     def _apply_interval(self) -> None:
         """Derive the interval Home Assistant schedules on from both states.
 
-        The only place update_interval is ever written. A backoff therefore
+        The only place update_interval is written after construction, where
+        the base class sets the same starting value. A backoff therefore
         cannot switch automatic polling back on: while the user has it off,
         _backoff may well be set, and the answer here is still None.
         """

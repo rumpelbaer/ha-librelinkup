@@ -26,6 +26,7 @@ from .runtime import (
     async_delete_issue,
 )
 
+
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     patient_id = entry.data.get(CONF_PATIENT_ID)
 
