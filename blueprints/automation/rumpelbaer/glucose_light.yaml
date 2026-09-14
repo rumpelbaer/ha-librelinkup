@@ -1,0 +1,171 @@
+blueprint:
+  name: LibreLinkUp Glucose Light
+  description: >
+    Visualize LibreLinkUp glucose values with an RGB light.
+    Glucose thresholds are fully configurable by the user.
+  domain: automation
+
+  input:
+    glucose_sensor:
+      name: Glucose sensor
+      description: LibreLinkUp glucose entity in mmol/L.
+      selector:
+        entity:
+          domain: sensor
+
+    stale_sensor:
+      name: Data stale sensor
+      description: LibreLinkUp Data Stale binary sensor.
+      selector:
+        entity:
+          domain: binary_sensor
+
+    target_light:
+      name: Target light
+      description: RGB-capable light used to visualize the glucose state.
+      selector:
+        target:
+          entity:
+            domain: light
+
+    very_low_threshold:
+      name: Very low threshold
+      default: 3.0
+      description: Values below this threshold are shown in red.
+      selector:
+        number:
+          min: 1
+          max: 30
+          step: 0.1
+          unit_of_measurement: mmol/L
+          mode: box
+
+    low_threshold:
+      name: Low threshold
+      default: 3.9
+      description: Values below this threshold are shown in orange.
+      selector:
+        number:
+          min: 1
+          max: 30
+          step: 0.1
+          unit_of_measurement: mmol/L
+          mode: box
+
+    high_threshold:
+      name: High threshold
+      default: 10.0
+      description: Values up to this threshold are shown in green.
+      selector:
+        number:
+          min: 1
+          max: 30
+          step: 0.1
+          unit_of_measurement: mmol/L
+          mode: box
+
+    very_high_threshold:
+      name: Very high threshold
+      default: 13.9
+      description: Values above the high threshold up to this value are shown in yellow; higher values are violet.
+      selector:
+        number:
+          min: 1
+          max: 30
+          step: 0.1
+          unit_of_measurement: mmol/L
+          mode: box
+
+    brightness:
+      name: Brightness
+      description: Brightness of the glucose light.
+      default: 180
+      selector:
+        number:
+          min: 1
+          max: 255
+          step: 1
+          mode: slider
+
+mode: restart
+
+trigger:
+  - platform: state
+    entity_id: !input glucose_sensor
+
+  - platform: state
+    entity_id: !input stale_sensor
+
+variables:
+  glucose_entity: !input glucose_sensor
+  stale_entity: !input stale_sensor
+  very_low: !input very_low_threshold
+  low: !input low_threshold
+  high: !input high_threshold
+  very_high: !input very_high_threshold
+  light_brightness: !input brightness
+
+action:
+  - choose:
+      - conditions:
+          - condition: template
+            value_template: >
+              {{ is_state(stale_entity, 'on')
+                 or states(glucose_entity) in ['unknown', 'unavailable'] }}
+        sequence:
+          - service: light.turn_on
+            target: !input target_light
+            data:
+              rgb_color: [0, 80, 255]
+              brightness: "{{ light_brightness }}"
+
+      - conditions:
+          - condition: template
+            value_template: >
+              {{ states(glucose_entity) | float(999) < very_low | float }}
+        sequence:
+          - service: light.turn_on
+            target: !input target_light
+            data:
+              rgb_color: [255, 0, 0]
+              brightness: "{{ light_brightness }}"
+
+      - conditions:
+          - condition: template
+            value_template: >
+              {{ states(glucose_entity) | float(999) < low | float }}
+        sequence:
+          - service: light.turn_on
+            target: !input target_light
+            data:
+              rgb_color: [255, 100, 0]
+              brightness: "{{ light_brightness }}"
+
+      - conditions:
+          - condition: template
+            value_template: >
+              {{ states(glucose_entity) | float(999) <= high | float }}
+        sequence:
+          - service: light.turn_on
+            target: !input target_light
+            data:
+              rgb_color: [0, 255, 0]
+              brightness: "{{ light_brightness }}"
+
+      - conditions:
+          - condition: template
+            value_template: >
+              {{ states(glucose_entity) | float(999) <= very_high | float }}
+        sequence:
+          - service: light.turn_on
+            target: !input target_light
+            data:
+              rgb_color: [255, 200, 0]
+              brightness: "{{ light_brightness }}"
+
+    default:
+      - service: light.turn_on
+        target: !input target_light
+        data:
+          rgb_color: [180, 0, 255]
+          brightness: "{{ light_brightness }}"
