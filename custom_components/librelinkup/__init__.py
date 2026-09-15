@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import NoReturn
 
 from homeassistant.config_entries import SOURCE_REAUTH, ConfigEntry
-from homeassistant.const import CONF_PASSWORD
+from homeassistant.const import CONF_EMAIL, CONF_PASSWORD
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.exceptions import ConfigEntryAuthFailed, ConfigEntryError, ConfigEntryNotReady
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
@@ -53,7 +53,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # configured for.
     runtime.entries[entry.entry_id] = patient_id
     runtime.coordinator.async_set_configured_patients(runtime.patient_ids)
-    _async_bind_runtime(hass, runtime)
+    _async_bind_runtime(hass, key, runtime)
     _async_apply_polling_preference(hass, runtime)
 
     await _async_initial_refresh(hass, runtime, key, entry, patient_id)
@@ -139,7 +139,7 @@ async def _async_initial_refresh(
                 # entry nor its patient behind in the shared runtime.
                 await _async_release(hass, key, entry.entry_id)
 
-                _raise_setup_failure(failure)
+                _raise_setup_failure(hass, key, entry.entry_id, failure)
 
         elif coordinator.measurement_for(patient_id) is None:
             # A person added to an account that is already polling should not
@@ -151,7 +151,9 @@ async def _async_initial_refresh(
             await coordinator.async_refresh()
 
 
-def _raise_setup_failure(failure: Exception | None) -> NoReturn:
+def _raise_setup_failure(
+    hass: HomeAssistant, key: str, entry_id: str, failure: Exception | None
+) -> NoReturn:
     """Tell Home Assistant what to do about a failed initial update.
 
     The one place that decides between a re-authentication dialog, a permanent
@@ -163,6 +165,22 @@ def _raise_setup_failure(failure: Exception | None) -> NoReturn:
     ClientResponseError's repr() carries the bearer token.
     """
     if isinstance(failure, ConfigEntryAuthFailed):
+        asked = _async_account_reauth_entry_id(hass, key)
+
+        if asked is not None and asked != entry_id:
+            # The account is already asking for its password, on one of its
+            # other entries. Home Assistant starts a reauth flow for every entry
+            # whose setup raises ConfigEntryAuthFailed and deduplicates those
+            # per entry, so raising it here would put a second dialog for the
+            # same wrong password in front of the user -- one per person on the
+            # account. A plain error instead: answering the one dialog reloads
+            # every entry of the account, which is what brings this one back.
+            raise ConfigEntryError(
+                "LibreLinkUp rejected the password for this account. "
+                "Enter it again in the re-authentication dialog Home Assistant "
+                "is already showing for this account."
+            ) from None
+
         raise ConfigEntryAuthFailed("LibreLinkUp authentication failed") from None
 
     if isinstance(failure, ConfigEntryError):
@@ -197,7 +215,7 @@ async def _async_release(hass: HomeAssistant, key: str, entry_id: str) -> None:
     if runtime.entries:
         # Drops everything the coordinator still held for the removed patient.
         runtime.coordinator.async_set_configured_patients(runtime.patient_ids)
-        _async_bind_runtime(hass, runtime)
+        _async_bind_runtime(hass, key, runtime)
         _async_apply_polling_preference(hass, runtime)
         return
 
@@ -230,7 +248,41 @@ def _async_apply_polling_preference(
 
 
 @callback
-def _async_bind_runtime(hass: HomeAssistant, runtime: AccountRuntime) -> None:
+def _async_account_reauth_entry_id(hass: HomeAssistant, key: str) -> str | None:
+    """The entry an open reauth dialog of this account belongs to, if any.
+
+    Home Assistant deduplicates reauth flows per config entry, and every entry
+    of one LibreLinkUp account runs into the very same rejected password. Which
+    account a flow belongs to is therefore asked of its config entry, never of
+    runtime.entries: a setup that fails on the password releases its entry
+    before the account's next entry retries, so the entry an open flow was
+    started for is routinely gone from the runtime by then.
+    """
+    for flow in hass.config_entries.flow.async_progress_by_handler(
+        DOMAIN,
+        match_context={"source": SOURCE_REAUTH},
+        include_uninitialized=True,
+    ):
+        entry_id = flow["context"].get("entry_id")
+
+        if entry_id is None:
+            continue
+
+        entry = hass.config_entries.async_get_entry(entry_id)
+
+        # ".get" rather than account_key(entry), as in the config flow: an entry
+        # that carries no address at all must not be matched against an
+        # unrelated account.
+        if entry is not None and account_key(entry.data.get(CONF_EMAIL, "")) == key:
+            return entry_id
+
+    return None
+
+
+@callback
+def _async_bind_runtime(
+    hass: HomeAssistant, key: str, runtime: AccountRuntime
+) -> None:
     """Wire the account's coordinator to reauth and to repair issues.
 
     Home Assistant starts reauth per config entry. Asking every patient's entry
@@ -245,17 +297,8 @@ def _async_bind_runtime(hass: HomeAssistant, runtime: AccountRuntime) -> None:
         if not runtime.entries:
             return
 
-        # Home Assistant deduplicates reauth flows per config entry, not per
-        # account, so a flow that is already open for any entry of this account
-        # -- including one whose entry has meanwhile been removed and replaced
-        # as the chosen one -- has to be found here.
-        for flow in hass.config_entries.flow.async_progress_by_handler(
-            DOMAIN,
-            match_context={"source": SOURCE_REAUTH},
-            include_uninitialized=True,
-        ):
-            if flow["context"].get("entry_id") in runtime.entries:
-                return
+        if _async_account_reauth_entry_id(hass, key) is not None:
+            return
 
         entry = hass.config_entries.async_get_entry(min(runtime.entries))
 

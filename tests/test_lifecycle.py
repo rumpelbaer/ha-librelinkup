@@ -37,12 +37,14 @@ from custom_components.librelinkup.runtime import account_key
 EMAIL = "user@example.com"
 
 
-def make_entry(hass, key, *, password="secret", **kwargs) -> MockConfigEntry:
+def make_entry(
+    hass, key, *, password="secret", email=EMAIL, **kwargs
+) -> MockConfigEntry:
     entry = MockConfigEntry(
         domain=DOMAIN,
         title=f"LibreLinkUp - Person {key}",
         data={
-            CONF_EMAIL: EMAIL,
+            CONF_EMAIL: email,
             CONF_PASSWORD: password,
             CONF_PATIENT_ID: f"patient-{key}",
             CONF_PATIENT_NAME: f"Person {key}",
@@ -307,6 +309,155 @@ async def test_no_second_flow_after_the_chosen_entry_is_removed(hass) -> None:
         ]
 
         assert len(flows) == 1
+
+
+@pytest.mark.parametrize("patient_count", [2, 3])
+async def test_a_failing_cold_start_opens_one_flow_for_the_whole_account(
+    hass, patient_count
+) -> None:
+    """The cold start every account hits once its stored password goes stale.
+
+    Home Assistant sets the entries of a domain up concurrently
+    (homeassistant/setup.py gathers them), so every entry of the account runs
+    into the same rejected password at the same time. Each failing setup
+    releases its entry from the shared runtime before the next one retries, so
+    the entry that the already-open reauth flow belongs to is routinely gone
+    from runtime.entries by then -- which is exactly what a membership-based
+    deduplication cannot see. One wrong password is one dialog, whether the
+    account follows one person or three.
+    """
+    entries = [make_entry(hass, key) for key in range(patient_count)]
+    login, _poll, flow_login, flow_connections = account_patch({})
+
+    with (
+        login,
+        patch(
+            "custom_components.librelinkup.coordinator.LibreLinkUpApi.async_get_measurements",
+            new=AsyncMock(side_effect=LibreLinkUpAuthenticationError("rejected")),
+        ),
+        flow_login,
+        flow_connections,
+    ):
+        await asyncio.gather(
+            *(hass.config_entries.async_setup(entry.entry_id) for entry in entries)
+        )
+        await hass.async_block_till_done()
+
+    flows = [
+        flow
+        for flow in hass.config_entries.flow.async_progress_by_handler(DOMAIN)
+        if flow["context"]["source"] == SOURCE_REAUTH
+    ]
+
+    assert len(flows) == 1
+
+    # The dialog belongs to an entry of this account, and every entry failed
+    # its setup cleanly: nothing of them stayed behind in the shared runtime.
+    assert flows[0]["context"]["entry_id"] in {entry.entry_id for entry in entries}
+    assert all(entry.state is ConfigEntryState.SETUP_ERROR for entry in entries)
+    assert not hass.data.get(DOMAIN)
+
+
+@pytest.mark.parametrize("patient_count", [2, 3])
+async def test_one_dialog_brings_the_whole_account_back(hass, patient_count) -> None:
+    """One dialog is only one dialog if it repairs every entry of the account.
+
+    After a cold start on a rejected password every entry of the account failed
+    its setup, and only one of them was given the dialog. Reloading just that
+    one would leave the account's other people broken until Home Assistant is
+    restarted -- which would make the single dialog a downgrade rather than a
+    fix.
+    """
+    entries = [make_entry(hass, key) for key in range(patient_count)]
+    measurements = snapshot(*entries)
+
+    login, poll, flow_login, flow_connections = account_patch(measurements)
+
+    with login, poll as poll_mock, flow_login, flow_connections:
+        poll_mock.side_effect = LibreLinkUpAuthenticationError("rejected")
+
+        await asyncio.gather(
+            *(hass.config_entries.async_setup(entry.entry_id) for entry in entries)
+        )
+        await hass.async_block_till_done()
+
+        flows = [
+            flow
+            for flow in hass.config_entries.flow.async_progress_by_handler(DOMAIN)
+            if flow["context"]["source"] == SOURCE_REAUTH
+        ]
+
+        assert len(flows) == 1
+        assert not any(entry.state is ConfigEntryState.LOADED for entry in entries)
+
+        # The user enters the new password, once.
+        poll_mock.side_effect = None
+        result = await hass.config_entries.flow.async_configure(
+            flows[0]["flow_id"], user_input={CONF_PASSWORD: "rotated"}
+        )
+        await hass.async_block_till_done()
+
+        assert result["type"] is FlowResultType.ABORT
+        assert result["reason"] == "reauth_successful"
+
+        # Every entry is loaded again, on one shared runtime, and every person
+        # is served -- not just the one that happened to own the dialog.
+        assert all(entry.state is ConfigEntryState.LOADED for entry in entries)
+        assert all(entry.data[CONF_PASSWORD] == "rotated" for entry in entries)
+        assert len(hass.data[DOMAIN]) == 1
+        assert runtime_of(hass, entries[0]).password == "rotated"
+
+        for index in range(patient_count):
+            state = hass.states.get(f"sensor.person_{index}_glucose")
+            assert state is not None
+            assert state.state == "6.4"
+
+
+async def test_each_account_gets_its_own_reauth_flow(hass) -> None:
+    """The counter-check: deduplicating per account must not merge accounts.
+
+    Two LibreLinkUp accounts, two rejected passwords, two dialogs -- otherwise
+    the fix for a duplicate dialog would silently swallow the second account's
+    request and leave it unable to recover.
+    """
+    other_email = "second@example.com"
+    first = [make_entry(hass, key) for key in range(2)]
+    second = [make_entry(hass, key, email=other_email) for key in range(2, 4)]
+
+    login, _poll, flow_login, flow_connections = account_patch({})
+
+    with (
+        login,
+        patch(
+            "custom_components.librelinkup.coordinator.LibreLinkUpApi.async_get_measurements",
+            new=AsyncMock(side_effect=LibreLinkUpAuthenticationError("rejected")),
+        ),
+        flow_login,
+        flow_connections,
+    ):
+        await asyncio.gather(
+            *(
+                hass.config_entries.async_setup(entry.entry_id)
+                for entry in first + second
+            )
+        )
+        await hass.async_block_till_done()
+
+    flows = [
+        flow
+        for flow in hass.config_entries.flow.async_progress_by_handler(DOMAIN)
+        if flow["context"]["source"] == SOURCE_REAUTH
+    ]
+
+    assert len(flows) == 2
+
+    # One per account, not two for either of them.
+    asked = {
+        account_key(hass.config_entries.async_get_entry(flow["context"]["entry_id"]))
+        for flow in flows
+    }
+
+    assert asked == {account_key(EMAIL), account_key(other_email)}
 
 
 # --- M1: the "Enable polling for updates" system option ----------------------

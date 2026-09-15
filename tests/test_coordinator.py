@@ -218,6 +218,17 @@ async def test_recovery_resets_failure_state(coordinator) -> None:
         ("1", MIN_BACKOFF),
         ("-5", MIN_BACKOFF),
         ("999999", MAX_RATE_LIMIT_BACKOFF),
+        # float() takes these happily and timedelta() then refuses them with an
+        # OverflowError, which is not a ValueError and used to escape the whole
+        # update -- taking the grace period with it, so every entity of the
+        # account went unavailable over a malformed header.
+        ("inf", RATE_LIMIT_DEFAULT_DELAY),
+        ("Infinity", RATE_LIMIT_DEFAULT_DELAY),
+        ("-inf", RATE_LIMIT_DEFAULT_DELAY),
+        ("1e400", RATE_LIMIT_DEFAULT_DELAY),
+        ("nan", RATE_LIMIT_DEFAULT_DELAY),
+        # Large but representable: clamped like any other oversized delay.
+        ("1e12", MAX_RATE_LIMIT_BACKOFF),
     ],
 )
 async def test_rate_limit_backoff(coordinator, retry_after, expected) -> None:
@@ -240,6 +251,25 @@ async def test_rate_limit_accepts_http_date(coordinator) -> None:
     assert timedelta(seconds=540) <= coordinator.update_interval <= timedelta(
         seconds=660
     )
+
+
+@pytest.mark.parametrize(
+    "retry_after", ["inf", "Infinity", "-inf", "1e400", "nan", "", "nonsense"]
+)
+async def test_a_hostile_retry_after_never_escapes_the_update(
+    coordinator, retry_after
+) -> None:
+    """Outside the grace period the failure still has to be an UpdateFailed.
+
+    Not an OverflowError: anything other than UpdateFailed skips Home
+    Assistant's own handling of a failed update and is logged with a traceback
+    that carries the request URL of the chained response error.
+    """
+    with_previous_success(coordinator, minutes_ago=20)
+    fail_with(coordinator, http_error(429, retry_after=retry_after))
+
+    with pytest.raises(UpdateFailed):
+        await coordinator._async_update_data()
 
 
 async def test_rate_limit_does_not_trigger_reauth(coordinator) -> None:

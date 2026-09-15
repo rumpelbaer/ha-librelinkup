@@ -267,12 +267,16 @@ class LibreLinkUpConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     def _async_reload_account(
         self, email: str, preferred: ConfigEntry | None = None
     ) -> None:
-        """Reload one entry of the account so the shared client is rebuilt.
+        """Reload the entries of the account so the shared client is rebuilt.
 
-        One is enough: the entries share a runtime, and its setup adopts the new
-        password and refreshes the account. The reauth entry is preferred, but if
-        it is disabled or was never loaded, a sibling repairs the account instead
-        of the flow failing.
+        Every reloadable one, not just the first. The entries share a runtime,
+        so for entries that are loaded a single reload would indeed be enough to
+        make the account adopt the new password. They are not all loaded after a
+        restart on a password Abbott no longer accepts: every entry of the
+        account then failed its setup, only one of them was given the dialog,
+        and any entry not reloaded here would stay broken until Home Assistant
+        is restarted. The reauth entry goes first, and the setup lock keeps the
+        rest from costing a request each.
         """
         candidates = sorted(
             self._account_entries(email),
@@ -288,7 +292,6 @@ class LibreLinkUpConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 continue
 
             self.hass.config_entries.async_schedule_reload(entry.entry_id)
-            return
 
     async def _async_create_entry(
         self,

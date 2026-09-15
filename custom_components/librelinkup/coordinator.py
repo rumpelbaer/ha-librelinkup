@@ -37,6 +37,18 @@ STALE_FAILURE_GRACE_PERIOD = timedelta(minutes=15)
 # silent sensor expire a patient after the same time.
 MAX_MEASUREMENT_AGE = timedelta(minutes=15)
 
+# How far a measurement may be dated into the future before it is refused.
+# FactoryTimestamp is produced by the sensor and the phone that read it, so a
+# little skew against the Home Assistant clock is normal and must not cost a
+# reading. A larger one is not normal, and trusting it is what makes the age
+# limit above stop working: every age derived from a future timestamp is
+# negative, and a negative age is younger than any limit, so the reading would
+# stay available with Data Stale off for as long as it stands -- the exact
+# outcome MAX_MEASUREMENT_AGE exists to prevent. Deliberately its own value and
+# never derived from the limits above: it answers "is this timestamp plausible
+# at all", not "how old may a reading be".
+ALLOWED_CLOCK_SKEW = timedelta(minutes=2)
+
 RATE_LIMIT_DEFAULT_DELAY = timedelta(minutes=5)
 MIN_BACKOFF = timedelta(seconds=60)
 MAX_RATE_LIMIT_BACKOFF = timedelta(minutes=30)
@@ -56,18 +68,25 @@ def _error_label(err: Exception) -> str:
 
 
 def _parse_retry_after(value: str | None) -> timedelta | None:
-    """Parse a Retry-After header in either delay-seconds or HTTP-date form."""
+    """Parse a Retry-After header in either delay-seconds or HTTP-date form.
+
+    OverflowError is caught next to TypeError and ValueError because float()
+    accepts "inf" and "1e400" happily and timedelta() then refuses them. An
+    unparsable header has to fall through to the caller's default; letting it
+    raise would take the whole update down, skipping the grace period that
+    keeps the last measurement alive through a rate limit.
+    """
     if not value:
         return None
 
     try:
         return timedelta(seconds=float(value))
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         pass
 
     try:
         retry_at = parsedate_to_datetime(value)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return None
 
     if retry_at.tzinfo is None:
@@ -355,6 +374,15 @@ class LibreLinkUpAccountCoordinator(DataUpdateCoordinator[dict[str, dict]]):
 
             if measured_at is None:  # pragma: no cover
                 # The API layer rejects unparsable timestamps already.
+                self._log_patient_problem(patient_id)
+                continue
+
+            if dt_util.utcnow() + ALLOWED_CLOCK_SKEW < measured_at:
+                # Refused here rather than where freshness is judged, so that
+                # _measured_at can never hold a timestamp the age rules cannot
+                # reason about and every consumer of it shares one decision.
+                # The patient keeps whatever previous reading they had, which
+                # then expires on its own age like any other.
                 self._log_patient_problem(patient_id)
                 continue
 

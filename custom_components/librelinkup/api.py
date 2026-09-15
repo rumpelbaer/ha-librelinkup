@@ -323,7 +323,17 @@ class LibreLinkUpApi:
             user_id = user.get("id")
             token = auth.get("token")
 
-            if not user_id or not token:
+            # Typed, not just truthy: a user ID that arrives as a number passes
+            # a falsy check and then fails on .encode() with an AttributeError,
+            # which is neither catchable as a response problem nor reportable
+            # to the user as one. Everything else in this module type-checks
+            # what it reads out of the payload; this is the same rule.
+            if (
+                not isinstance(user_id, str)
+                or not isinstance(token, str)
+                or not user_id
+                or not token
+            ):
                 raise LibreLinkUpResponseError(
                     "LibreLinkUp login did not return user ID and token"
                 )

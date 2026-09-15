@@ -86,7 +86,7 @@ Each person gets one device with these entities:
 | Glucose | sensor | mmol/L, `blood_glucose_concentration`. Home Assistant can display it in mg/dL per entity. Carries the raw `glucose_mg_dl` attribute. |
 | Trend | sensor | Enum: `not_determined`, `falling_rapidly`, `falling`, `stable`, `rising`, `rising_rapidly`. |
 | Low / High | binary sensor | The flags LibreLinkUp reports with the reading. |
-| Data Stale | binary sensor | On once the reading is older than 5 minutes. |
+| Data Stale | binary sensor | On once the reading is older than 5 minutes, and unavailable itself once it passes 15 (see below). |
 | Last Reading | sensor | Timestamp of the reading. Diagnostic. |
 | Reading Age | sensor | Age in minutes. Diagnostic, **disabled by default** because it changes every minute and would otherwise fill the recorder. |
 
@@ -97,11 +97,38 @@ A person's entities become unavailable when **their own reading** is older than
 or a share that was removed, therefore stops the value instead of freezing it:
 LibreLinkUp keeps answering with the last known reading in both cases.
 
-Any automation that acts on the glucose value should check **Data Stale** first.
+The full sequence for one person, measured from the timestamp of their reading:
+
+| Age of the reading | Glucose and the other entities | Data Stale |
+| --- | --- | --- |
+| up to 5 minutes | the current value | `off` |
+| 5 to 15 minutes | still the last value | `on` |
+| more than 15 minutes | `unavailable` | `unavailable` |
+
+**Checking Data Stale alone is not enough.** Past 15 minutes every entity of
+that person goes unavailable, Data Stale included — so it is not `on` at that
+point, it is `unavailable`, and a condition that only asks whether Data Stale is
+`on` will read the oldest data as if it were fine. An automation that acts on
+the glucose value has to require that value to be a usable number as well, for
+example:
+
+```yaml
+condition:
+  - condition: template
+    value_template: >-
+      {{ not is_state('binary_sensor.person_data_stale', 'on')
+         and states('sensor.person_glucose') | float(-1) >= 0 }}
+```
+
+The blueprint below already does both: it falls back to the stale colour when
+Data Stale is `on` *or* when the glucose state does not parse as a number, which
+covers `unavailable` and `unknown` alike.
 
 This also means the clock of the Home Assistant host matters: LibreLinkUp
-timestamps are UTC, and a host clock that is off by more than 15 minutes makes
-every reading look expired.
+timestamps are UTC. A host clock running fast makes every reading look expired.
+A host clock running slow would make readings look as if they came from the
+future, which would otherwise keep them "fresh" forever, so a reading dated more
+than two minutes ahead of the host clock is refused instead of being trusted.
 
 ## Blueprint
 

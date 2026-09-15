@@ -254,8 +254,16 @@ variables:
     {{ glucose_raw >= 0 and glucose_unit in ['mmol/L', 'mg/dL'] }}
   # Thresholds are mmol/L, so everything is compared in mmol/L. 0 when the
   # reading is unusable; glucose_usable is what decides, never this value.
+  #
+  # 18.0 and not the 18.0182 used in diabetes care, on purpose: the LibreLinkUp
+  # glucose entity is mmol/L natively, and an mg/dL state only exists because
+  # Home Assistant converted it for display with a flat factor of 18. What has
+  # to be undone here is that conversion, so this factor has to be the same one.
+  # With 18.0182 a reading sitting exactly on a threshold came back roughly
+  # 0.1 % low and was classified one band more alarming than the identical
+  # reading displayed in mmol/L.
   glucose_mmol: >-
-    {{ 0 if not glucose_usable else (glucose_raw / 18.0182 if glucose_unit == 'mg/dL' else glucose_raw) }}
+    {{ 0 if not glucose_usable else (glucose_raw / 18.0 if glucose_unit == 'mg/dL' else glucose_raw) }}
 
 action:
   - choose:

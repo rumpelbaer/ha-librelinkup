@@ -10,6 +10,8 @@ from __future__ import annotations
 from datetime import timedelta
 
 import pytest
+from unittest.mock import MagicMock
+
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.util import dt as dt_util
 
@@ -21,6 +23,7 @@ from custom_components.librelinkup.api import (
     LibreLinkUpResponseError,
 )
 from custom_components.librelinkup.coordinator import (
+    ALLOWED_CLOCK_SKEW,
     MAX_MEASUREMENT_AGE,
     LibreLinkUpAccountCoordinator,
 )
@@ -238,6 +241,127 @@ async def test_availability_follows_the_measurement_age(
     await coordinator.async_refresh()
 
     assert coordinator.is_patient_available("patient-a") is available
+
+
+@pytest.mark.parametrize(
+    ("minutes_ahead", "usable"),
+    [
+        # Nothing ahead at all, and a skew well inside the tolerance.
+        (0.0, True),
+        (1.0, True),
+        # Exactly on the tolerance is still accepted: the limit is what may not
+        # be exceeded, not what may not be reached.
+        (2.0, True),
+        # Just past it, and far past it.
+        (2.5, False),
+        (120.0, False),
+    ],
+)
+async def test_a_future_timestamp_is_refused_past_the_clock_skew(
+    hass, coordinator, minutes_ahead, usable
+) -> None:
+    """A reading from the future would never age, so it is never trusted.
+
+    Every age is "now minus the measurement", so a timestamp ahead of the host
+    clock produces a negative age -- and a negative age is younger than any
+    limit. Such a reading would stay available with Data Stale off for as long
+    as it stands, which is exactly what the age limit exists to prevent. A
+    little skew is normal and must not cost a reading; more than that is
+    refused.
+    """
+    from unittest.mock import AsyncMock
+
+    coordinator.api.async_get_measurements = AsyncMock(
+        return_value={"patient-a": measurement(minutes_ago=-minutes_ahead)}
+    )
+
+    await coordinator.async_refresh()
+
+    # The account itself polled fine either way.
+    assert coordinator.last_update_success is True
+    assert coordinator.is_patient_available("patient-a") is usable
+
+    if usable:
+        return
+
+    # Refused means refused everywhere: the reading is not in the snapshot and
+    # no timestamp was kept for it, so nothing downstream can call it fresh.
+    assert coordinator.measurement_for("patient-a") is None
+    assert coordinator.measured_at_for("patient-a") is None
+
+
+async def test_a_future_timestamp_never_reads_as_available_and_fresh(
+    hass, coordinator
+) -> None:
+    """The combination that would be actively misleading on a health entity."""
+    from unittest.mock import AsyncMock
+
+    from custom_components.librelinkup.binary_sensor import LibreLinkUpDataStaleSensor
+
+    coordinator.api.async_get_measurements = AsyncMock(
+        return_value={"patient-a": measurement(minutes_ago=-120)}
+    )
+
+    await coordinator.async_refresh()
+
+    entry = MagicMock()
+    entry.entry_id = "entry"
+    entry.data = {"patient_id": "patient-a"}
+    stale = LibreLinkUpDataStaleSensor(coordinator, entry)
+
+    # Never "available, and explicitly not stale" -- the reading is refused, so
+    # the entity is unavailable and its own answer is "stale" rather than "off".
+    assert coordinator.is_patient_available("patient-a") is False
+    assert stale.is_on is True
+
+
+async def test_a_future_timestamp_only_costs_its_own_patient(hass, coordinator) -> None:
+    """One implausible clock must not expire everybody else on the account."""
+    from unittest.mock import AsyncMock
+
+    coordinator.async_set_configured_patients(["patient-a", "patient-b"])
+    coordinator.api.async_get_measurements = AsyncMock(
+        return_value={
+            "patient-a": measurement(),
+            "patient-b": measurement(minutes_ago=-120),
+        }
+    )
+
+    await coordinator.async_refresh()
+
+    assert coordinator.last_update_success is True
+    assert coordinator.is_patient_available("patient-a") is True
+    assert coordinator.is_patient_available("patient-b") is False
+    # And A's reading is really A's, not a fallback.
+    assert coordinator.measurement_for("patient-a")["ValueInMgPerDl"] == 115
+
+
+async def test_a_future_timestamp_does_not_replace_a_good_reading(
+    hass, coordinator
+) -> None:
+    """A patient keeps the last reading that was plausible, and it ages."""
+    from unittest.mock import AsyncMock
+
+    coordinator.api.async_get_measurements = AsyncMock(
+        return_value={"patient-a": measurement(value=115)}
+    )
+    await coordinator.async_refresh()
+
+    coordinator.api.async_get_measurements = AsyncMock(
+        return_value={"patient-a": measurement(value=200, minutes_ago=-120)}
+    )
+    await coordinator.async_refresh()
+
+    # The implausible reading was dropped, not adopted...
+    assert coordinator.measurement_for("patient-a")["ValueInMgPerDl"] == 115
+    # ...and the kept one still expires on its own age.
+    assert coordinator.is_patient_available("patient-a") is True
+
+
+async def test_the_clock_skew_tolerance_is_its_own_value() -> None:
+    """Not derived from the age limits: it answers a different question."""
+    assert ALLOWED_CLOCK_SKEW == timedelta(minutes=2)
+    assert ALLOWED_CLOCK_SKEW != MAX_MEASUREMENT_AGE
 
 
 async def test_the_age_limit_matches_the_documented_value() -> None:

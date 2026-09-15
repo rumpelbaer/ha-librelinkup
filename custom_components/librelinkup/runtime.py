@@ -38,7 +38,11 @@ class AccountRuntime:
 
     api: LibreLinkUpApi
     coordinator: LibreLinkUpAccountCoordinator
-    password: str
+    # repr=False: this object lives in hass.data, and a dataclass renders every
+    # field. Nothing prints it today, but a future log line, a traceback that
+    # formats its arguments or a third-party hass.data dump would otherwise put
+    # the account password in a file.
+    password: str = field(repr=False)
     # entry_id -> patient_id of every loaded entry of this account. The patient
     # IDs are what the coordinator is allowed to keep data for.
     entries: dict[str, str] = field(default_factory=dict)

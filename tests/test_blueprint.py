@@ -151,7 +151,10 @@ async def test_only_three_inputs_are_required() -> None:
         # The same readings as mg/dL, which Home Assistant lets the user choose.
         # Before the conversion every one of these was classified "very high".
         ("115.2", "mg/dL", NORMAL),
-        ("54", "mg/dL", VERY_LOW),
+        # 2.9 mmol/L as Home Assistant displays it: 2.9 * 18. Was 54 before,
+        # which is 3.0 mmol/L and therefore sits exactly on the very low
+        # threshold -- it is covered as a threshold case below instead.
+        ("52.2", "mg/dL", VERY_LOW),
         ("65", "mg/dL", LOW),
         ("216", "mg/dL", HIGH),
         ("270", "mg/dL", VERY_HIGH),
@@ -169,6 +172,43 @@ async def test_glucose_classification(hass, state, unit, expected) -> None:
     turn_on, _ = await _run(hass, state=state, unit=unit)
 
     assert _color(turn_on) == expected
+
+
+# Every threshold, in both display units. Home Assistant converts a mmol/L blood
+# glucose entity to mg/dL for display with a flat factor of 18, so the mg/dL
+# column is exactly what a user with that display setting sees for the mmol/L
+# reading next to it. The pair has to be classified identically: which unit the
+# entity happens to be displayed in is not a fact about the person's glucose.
+#
+# These are the values that used to disagree. The blueprint divided by the
+# 18.0182 of diabetes care instead of undoing Home Assistant's 18, so a reading
+# sitting exactly on a threshold came back about 0.1 % low -- under the
+# exclusive thresholds it was meant to be on, and one band more alarming.
+@pytest.mark.parametrize(
+    ("mmol", "mg_dl", "expected"),
+    [
+        # very low: exclusive, so exactly on it is already "low".
+        ("3.0", "54", LOW),
+        ("2.99", "53.82", VERY_LOW),
+        # low: exclusive, so exactly on it is "normal".
+        ("3.9", "70.2", NORMAL),
+        ("3.89", "70.02", LOW),
+        # high: inclusive, so exactly on it is still "normal".
+        ("10.0", "180", NORMAL),
+        ("10.01", "180.18", HIGH),
+        # very high: inclusive, so exactly on it is still "high".
+        ("13.9", "250.2", HIGH),
+        ("13.91", "250.38", VERY_HIGH),
+    ],
+)
+async def test_a_threshold_is_the_same_threshold_in_either_display_unit(
+    hass, mmol, mg_dl, expected
+) -> None:
+    in_mmol, _ = await _run(hass, state=mmol, unit="mmol/L")
+    assert _color(in_mmol) == expected
+
+    in_mg_dl, _ = await _run(hass, state=mg_dl, unit="mg/dL")
+    assert _color(in_mg_dl) == expected
 
 
 @pytest.mark.parametrize(

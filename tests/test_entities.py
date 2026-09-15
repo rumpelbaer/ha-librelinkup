@@ -243,6 +243,40 @@ def test_low_and_high_sensors() -> None:
     assert high.is_on is False
 
 
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        # What LibreLinkUp really sends: JSON booleans.
+        (True, True),
+        (False, False),
+        # A changed payload shape must never invent an alarm. "false" is the
+        # dangerous one: under bool() a non-empty string is truthy, so the flag
+        # would read as set precisely when it says it is not.
+        ("false", False),
+        ("true", False),
+        ("", False),
+        (1, False),
+        (0, False),
+        (None, False),
+        ([], False),
+        ({}, False),
+    ],
+)
+def test_low_and_high_only_accept_a_real_boolean(raw, expected) -> None:
+    """These flags are not validated by the API layer, so they arrive raw."""
+    coordinator = FakeCoordinator({"isLow": raw, "isHigh": raw})
+
+    assert LibreLinkUpLowSensor(coordinator, make_entry()).is_on is expected
+    assert LibreLinkUpHighSensor(coordinator, make_entry()).is_on is expected
+
+
+def test_a_missing_flag_is_not_an_alarm() -> None:
+    coordinator = FakeCoordinator({"ValueInMgPerDl": 115})
+
+    assert LibreLinkUpLowSensor(coordinator, make_entry()).is_on is False
+    assert LibreLinkUpHighSensor(coordinator, make_entry()).is_on is False
+
+
 def test_last_reading_sensor() -> None:
     coordinator = FakeCoordinator(
         {

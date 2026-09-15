@@ -54,7 +54,12 @@ class LibreLinkUpLowSensor(LibreLinkUpPatientEntity, BinarySensorEntity):
 
     @property
     def is_on(self) -> bool:
-        return bool(self._measurement.get("isLow"))
+        # "is True", not bool(): LibreLinkUp sends these as JSON booleans, and
+        # the API layer deliberately does not require them, so whatever arrives
+        # reaches this entity untouched. Under bool() a changed payload that
+        # spells the flag "false" would read as truthy and light up a low
+        # alarm. Anything that is not the boolean true means "not flagged".
+        return self._measurement.get("isLow") is True
 
 
 class LibreLinkUpHighSensor(LibreLinkUpPatientEntity, BinarySensorEntity):
@@ -63,4 +68,5 @@ class LibreLinkUpHighSensor(LibreLinkUpPatientEntity, BinarySensorEntity):
 
     @property
     def is_on(self) -> bool:
-        return bool(self._measurement.get("isHigh"))
+        # See LibreLinkUpLowSensor.is_on.
+        return self._measurement.get("isHigh") is True

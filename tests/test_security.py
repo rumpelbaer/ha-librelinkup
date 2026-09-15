@@ -225,3 +225,29 @@ def test_repair_issue_ids_are_keyed_by_config_entry() -> None:
         assert names <= {"entry", "entry_id"}, (
             f"{path.name}:{call.lineno}: issue ID keyed by {names}"
         )
+
+
+def test_the_account_runtime_never_renders_its_password() -> None:
+    """AccountRuntime lives in hass.data, and a dataclass renders every field.
+
+    Nothing prints it today. A future log line, a traceback that formats its
+    arguments or a third-party dump of hass.data would, and the field it would
+    print is the account password in plain text.
+    """
+    from unittest.mock import MagicMock
+
+    from custom_components.librelinkup.runtime import AccountRuntime
+
+    sentinel = "sentinel-password-must-not-appear"
+    runtime = AccountRuntime(
+        api=MagicMock(),
+        coordinator=MagicMock(),
+        password=sentinel,
+    )
+
+    rendered = repr(runtime)
+
+    assert sentinel not in rendered
+    assert "password=" not in rendered
+    # The value is still there, it just does not render.
+    assert runtime.password == sentinel

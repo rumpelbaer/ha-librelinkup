@@ -131,6 +131,75 @@ async def test_a_login_without_token_is_a_response_error(hass, aioclient_mock) -
         await api.async_login()
 
 
+@pytest.mark.parametrize(
+    ("user_id", "token"),
+    [
+        # A user ID that is not a string passes a falsy check and then fails on
+        # .encode() -- an AttributeError the caller cannot treat as a response
+        # problem, and the config flow can only report as "unknown".
+        (12345, "a-token"),
+        ({"id": "x"}, "a-token"),
+        ([1], "a-token"),
+        (True, "a-token"),
+        (1.5, "a-token"),
+        # The same for the token.
+        ("user-id", 12345),
+        ("user-id", {"token": "x"}),
+        ("user-id", True),
+        # And the falsy cases that always had to be rejected.
+        ("", "a-token"),
+        ("user-id", ""),
+        (None, "a-token"),
+        ("user-id", None),
+    ],
+)
+async def test_a_malformed_login_payload_is_a_response_error(
+    hass, aioclient_mock, user_id, token
+) -> None:
+    """Status 0 but an unusable ticket: the payload is broken, not the password."""
+    aioclient_mock.post(
+        LOGIN_URL,
+        json={
+            "status": 0,
+            "data": {"user": {"id": user_id}, "authTicket": {"token": token}},
+        },
+    )
+    api = make_api(hass)
+
+    with pytest.raises(LibreLinkUpResponseError):
+        await api.async_login()
+
+    # Not merely "some exception": an AttributeError here would reach the user
+    # as an unknown error and the coordinator as an unnamed failure.
+    assert api.has_token is False
+
+
+async def test_a_malformed_login_payload_says_nothing_about_itself(
+    hass, aioclient_mock
+) -> None:
+    """The payload must not be dressed into the message on its way out."""
+    aioclient_mock.post(
+        LOGIN_URL,
+        json={
+            "status": 0,
+            "data": {
+                "user": {"id": 12345, "email": EMAIL},
+                "authTicket": {"token": "super-secret-token"},
+            },
+        },
+    )
+    api = make_api(hass)
+
+    with pytest.raises(LibreLinkUpResponseError) as caught:
+        await api.async_login()
+
+    message = str(caught.value)
+
+    assert "12345" not in message
+    assert "super-secret-token" not in message
+    assert EMAIL not in message
+
+
 async def test_region_redirect_is_followed_once(hass, aioclient_mock) -> None:
     aioclient_mock.post(
         LOGIN_URL, json={"status": 0, "data": {"redirect": True, "region": "eu2"}}
