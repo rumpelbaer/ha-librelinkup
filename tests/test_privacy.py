@@ -7,6 +7,8 @@ be stored, logged, exposed as attributes or carried into diagnostics.
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -29,6 +31,18 @@ from custom_components.librelinkup.diagnostics import (
     async_get_config_entry_diagnostics,
 )
 from custom_components.librelinkup.runtime import account_key
+
+MANIFEST_PATH = (
+    Path(__file__).resolve().parents[1]
+    / "custom_components"
+    / "librelinkup"
+    / "manifest.json"
+)
+
+# Read from the manifest rather than repeated as a literal here: diagnostics
+# report the version out of that same file, so a release bump must not also
+# require a test edit -- and the two can never drift apart.
+MANIFEST_VERSION = json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))["version"]
 
 EMAIL = "user@example.com"
 PASSWORD = "super-secret-password"
@@ -408,7 +422,7 @@ async def test_diagnostics_describe_the_problem_not_the_person(hass) -> None:
     assert diagnostics["configured_patients"] == 1
     assert diagnostics["patients_with_data"] == 1
     assert diagnostics["seconds_since_last_success"] >= 0
-    assert diagnostics["integration_version"] == "0.1.0"
+    assert diagnostics["integration_version"] == MANIFEST_VERSION
 
 
 async def test_diagnostics_contain_no_identifying_or_health_data(hass) -> None:
