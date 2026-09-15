@@ -3,7 +3,8 @@ blueprint:
   description: >
     Visual orientation only: colours an RGB light according to a LibreLinkUp
     glucose sensor. Thresholds, colours, brightness and activation conditions
-    are configurable.
+    are configurable. The normal range can alternatively be shown as a colour
+    temperature, which suits lights with a dedicated white channel.
 
 
     Not a medical device. Never use the colour of a lamp for treatment,
@@ -40,7 +41,9 @@ blueprint:
 
     target_light:
       name: Target light
-      description: RGB-capable, dimmable light used to visualize the glucose state.
+      description: >
+        Dimmable light used to visualize the glucose state. Every range outside
+        normal uses an RGB colour, so the light has to be RGB-capable.
       selector:
         target:
           entity:
@@ -96,31 +99,58 @@ blueprint:
 
     very_low_color:
       name: Very low color
-      default: [255, 0, 0]
+      default: [205, 75, 65]
       selector:
         color_rgb:
 
     low_color:
       name: Low color
-      default: [255, 100, 0]
+      default: [235, 165, 45]
       selector:
         color_rgb:
 
+    normal_color_mode:
+      name: Normal - display style
+      description: >
+        How the normal range is shown: as an RGB colour, or as a colour
+        temperature. Colour temperature suits lights with a white channel,
+        which render warm white more naturally than an RGB mix. Every other
+        range always uses its RGB colour.
+      default: rgb
+      selector:
+        select:
+          options:
+            - rgb
+            - color_temp
+
     normal_color:
-      name: Normal color
-      default: [0, 255, 0]
+      name: Normal - RGB color
+      description: Used when the normal display style is "rgb".
+      default: [255, 180, 110]
       selector:
         color_rgb:
+
+    normal_color_temp_kelvin:
+      name: Normal - color temperature
+      description: Used when the normal display style is "color_temp".
+      default: 2700
+      selector:
+        number:
+          min: 2200
+          max: 4000
+          step: 50
+          unit_of_measurement: K
+          mode: slider
 
     high_color:
       name: High color
-      default: [255, 200, 0]
+      default: [120, 140, 210]
       selector:
         color_rgb:
 
     very_high_color:
       name: Very high color
-      default: [180, 0, 255]
+      default: [95, 70, 160]
       selector:
         color_rgb:
 
@@ -130,19 +160,74 @@ blueprint:
         Used when the reading is stale or unavailable, and whenever the glucose
         value cannot be classified - for example because the entity reports an
         unexpected unit. Never a glucose range.
-      default: [0, 80, 255]
+      default: [115, 110, 120]
       selector:
         color_rgb:
 
-    brightness:
-      name: Brightness
-      description: Brightness of the glucose light.
-      default: 180
+    very_low_brightness:
+      name: Very low brightness
+      default: 75
       selector:
         number:
           min: 1
-          max: 255
+          max: 100
           step: 1
+          unit_of_measurement: "%"
+          mode: slider
+
+    low_brightness:
+      name: Low brightness
+      default: 70
+      selector:
+        number:
+          min: 1
+          max: 100
+          step: 1
+          unit_of_measurement: "%"
+          mode: slider
+
+    normal_brightness:
+      name: Normal brightness
+      default: 60
+      selector:
+        number:
+          min: 1
+          max: 100
+          step: 1
+          unit_of_measurement: "%"
+          mode: slider
+
+    high_brightness:
+      name: High brightness
+      default: 70
+      selector:
+        number:
+          min: 1
+          max: 100
+          step: 1
+          unit_of_measurement: "%"
+          mode: slider
+
+    very_high_brightness:
+      name: Very high brightness
+      default: 75
+      selector:
+        number:
+          min: 1
+          max: 100
+          step: 1
+          unit_of_measurement: "%"
+          mode: slider
+
+    stale_brightness:
+      name: Stale, unknown or unusable brightness
+      default: 45
+      selector:
+        number:
+          min: 1
+          max: 100
+          step: 1
+          unit_of_measurement: "%"
           mode: slider
 
     activation_mode:
@@ -230,14 +315,22 @@ variables:
   high: !input high_threshold
   very_high: !input very_high_threshold
 
-  light_brightness: !input brightness
-
   color_very_low: !input very_low_color
   color_low: !input low_color
   color_normal: !input normal_color
   color_high: !input high_color
   color_very_high: !input very_high_color
   color_stale: !input stale_color
+
+  normal_mode: !input normal_color_mode
+  normal_kelvin: !input normal_color_temp_kelvin
+
+  brightness_very_low: !input very_low_brightness
+  brightness_low: !input low_brightness
+  brightness_normal: !input normal_brightness
+  brightness_high: !input high_brightness
+  brightness_very_high: !input very_high_brightness
+  brightness_stale: !input stale_brightness
 
   activation: !input activation_mode
   active_start: !input active_start_time
@@ -320,7 +413,7 @@ action:
                 target: !input target_light
                 data:
                   rgb_color: "{{ color_stale }}"
-                  brightness: "{{ light_brightness }}"
+                  brightness_pct: "{{ brightness_stale }}"
 
           - conditions:
               - condition: template
@@ -331,7 +424,7 @@ action:
                 target: !input target_light
                 data:
                   rgb_color: "{{ color_very_low }}"
-                  brightness: "{{ light_brightness }}"
+                  brightness_pct: "{{ brightness_very_low }}"
 
           - conditions:
               - condition: template
@@ -342,18 +435,29 @@ action:
                 target: !input target_light
                 data:
                   rgb_color: "{{ color_low }}"
-                  brightness: "{{ light_brightness }}"
+                  brightness_pct: "{{ brightness_low }}"
 
           - conditions:
               - condition: template
                 value_template: >-
                   {{ glucose_mmol | float <= high | float }}
             sequence:
-              - service: light.turn_on
-                target: !input target_light
-                data:
-                  rgb_color: "{{ color_normal }}"
-                  brightness: "{{ light_brightness }}"
+              - choose:
+                  - conditions:
+                      - condition: template
+                        value_template: "{{ normal_mode == 'color_temp' }}"
+                    sequence:
+                      - service: light.turn_on
+                        target: !input target_light
+                        data:
+                          color_temp_kelvin: "{{ normal_kelvin }}"
+                          brightness_pct: "{{ brightness_normal }}"
+                default:
+                  - service: light.turn_on
+                    target: !input target_light
+                    data:
+                      rgb_color: "{{ color_normal }}"
+                      brightness_pct: "{{ brightness_normal }}"
 
           - conditions:
               - condition: template
@@ -364,11 +468,11 @@ action:
                 target: !input target_light
                 data:
                   rgb_color: "{{ color_high }}"
-                  brightness: "{{ light_brightness }}"
+                  brightness_pct: "{{ brightness_high }}"
 
         default:
           - service: light.turn_on
             target: !input target_light
             data:
               rgb_color: "{{ color_very_high }}"
-              brightness: "{{ light_brightness }}"
+              brightness_pct: "{{ brightness_very_high }}"

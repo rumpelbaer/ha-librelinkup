@@ -48,12 +48,52 @@ GLUCOSE = "sensor.person_glucose"
 STALE = "binary_sensor.person_data_stale"
 LIGHT = "light.glucose"
 
-VERY_LOW = (255, 0, 0)
-LOW = (255, 100, 0)
-NORMAL = (0, 255, 0)
-HIGH = (255, 200, 0)
-VERY_HIGH = (180, 0, 255)
-STALE_COLOR = (0, 80, 255)
+VERY_LOW = (205, 75, 65)
+LOW = (235, 165, 45)
+NORMAL = (255, 180, 110)
+HIGH = (120, 140, 210)
+VERY_HIGH = (95, 70, 160)
+STALE_COLOR = (115, 110, 120)
+
+# The default brightness of every range, in percent.
+DEFAULT_BRIGHTNESS = {
+    VERY_LOW: 75,
+    LOW: 70,
+    NORMAL: 60,
+    HIGH: 70,
+    VERY_HIGH: 75,
+    STALE_COLOR: 45,
+}
+
+BRIGHTNESS_INPUT = {
+    VERY_LOW: "very_low_brightness",
+    LOW: "low_brightness",
+    NORMAL: "normal_brightness",
+    HIGH: "high_brightness",
+    VERY_HIGH: "very_high_brightness",
+    STALE_COLOR: "stale_brightness",
+}
+
+# Six values that are distinct, so a brightness wired to the wrong range shows
+# up instead of hiding behind an identical default.
+CUSTOM_BRIGHTNESS = {
+    "very_low_brightness": 11,
+    "low_brightness": 22,
+    "normal_brightness": 33,
+    "high_brightness": 44,
+    "very_high_brightness": 55,
+    "stale_brightness": 66,
+}
+
+# One reading per range, and the stale sensor for the stale colour.
+READING_PER_RANGE = [
+    ("2.9", "off", VERY_LOW),
+    ("3.5", "off", LOW),
+    ("6.4", "off", NORMAL),
+    ("12.0", "off", HIGH),
+    ("15.0", "off", VERY_HIGH),
+    ("6.4", "on", STALE_COLOR),
+]
 
 BASE_INPUT = {
     "glucose_sensor": GLUCOSE,
@@ -110,9 +150,17 @@ async def _run(hass, *, state: str, unit: str | None, stale: str = "off", **extr
     return turn_on, turn_off
 
 
-def _color(calls) -> tuple:
+def _data(calls) -> dict:
     assert len(calls) == 1, f"expected exactly one light.turn_on, got {len(calls)}"
-    return tuple(calls[0].data["rgb_color"])
+    return calls[0].data
+
+
+def _color(calls) -> tuple:
+    data = _data(calls)
+    # The two colour modes are mutually exclusive: light.turn_on never gets an
+    # RGB colour and a colour temperature in the same call.
+    assert "color_temp_kelvin" not in data
+    return tuple(data["rgb_color"])
 
 
 async def test_blueprint_schema_is_valid(hass) -> None:
@@ -124,6 +172,8 @@ async def test_blueprint_schema_is_valid(hass) -> None:
         {"activation_mode": "time_or_presence"},
         {"active_start_time": "20:00:00", "active_end_time": "07:00:00"},
         {"inactive_behavior": "leave_unchanged"},
+        {"normal_color_mode": "rgb"},
+        {"normal_color_mode": "color_temp", "normal_color_temp_kelvin": 3000},
     ):
         await async_validate_config_item(hass, "automation", _automation_config(**extra))
 
@@ -232,6 +282,96 @@ async def test_stale_sensor_wins_over_a_valid_reading(hass) -> None:
     turn_on, _ = await _run(hass, state="6.4", unit="mmol/L", stale="on")
 
     assert _color(turn_on) == STALE_COLOR
+
+
+# --- Palette and the display style of the normal range ------------------------
+
+
+@pytest.mark.parametrize(("state", "stale", "expected"), READING_PER_RANGE)
+async def test_the_defaults_are_the_intended_palette(hass, state, stale, expected) -> None:
+    """What an installation that configures no colour at all ends up with."""
+    turn_on, _ = await _run(hass, state=state, unit="mmol/L", stale=stale)
+
+    assert _color(turn_on) == expected
+    assert _data(turn_on)["brightness_pct"] == DEFAULT_BRIGHTNESS[expected]
+
+
+@pytest.mark.parametrize(("state", "stale", "expected"), READING_PER_RANGE)
+async def test_every_range_carries_its_own_brightness(hass, state, stale, expected) -> None:
+    turn_on, _ = await _run(
+        hass, state=state, unit="mmol/L", stale=stale, **CUSTOM_BRIGHTNESS
+    )
+
+    assert _color(turn_on) == expected
+    assert _data(turn_on)["brightness_pct"] == CUSTOM_BRIGHTNESS[BRIGHTNESS_INPUT[expected]]
+
+
+async def test_normal_is_rgb_without_a_display_style(hass) -> None:
+    """The default keeps an RGB-only light working without any configuration."""
+    turn_on, _ = await _run(hass, state="6.4", unit="mmol/L")
+
+    data = _data(turn_on)
+    assert tuple(data["rgb_color"]) == NORMAL
+    assert "color_temp_kelvin" not in data
+    assert data["brightness_pct"] == 60
+
+
+async def test_normal_in_rgb_mode_ignores_the_color_temperature(hass) -> None:
+    turn_on, _ = await _run(
+        hass,
+        state="6.4",
+        unit="mmol/L",
+        normal_color_mode="rgb",
+        normal_color_temp_kelvin=2730,
+    )
+
+    data = _data(turn_on)
+    assert tuple(data["rgb_color"]) == NORMAL
+    assert "color_temp_kelvin" not in data
+    assert data["brightness_pct"] == 60
+
+
+@pytest.mark.parametrize("kelvin", [2730, 3000])
+async def test_normal_in_color_temp_mode_sends_kelvin_and_no_rgb(hass, kelvin) -> None:
+    turn_on, _ = await _run(
+        hass,
+        state="6.4",
+        unit="mmol/L",
+        normal_color_mode="color_temp",
+        normal_color_temp_kelvin=kelvin,
+    )
+
+    data = _data(turn_on)
+    assert data["color_temp_kelvin"] == kelvin
+    assert "rgb_color" not in data
+    assert data["brightness_pct"] == 60
+
+
+async def test_color_temp_mode_defaults_to_warm_white(hass) -> None:
+    turn_on, _ = await _run(
+        hass, state="6.4", unit="mmol/L", normal_color_mode="color_temp"
+    )
+
+    assert _data(turn_on)["color_temp_kelvin"] == 2700
+
+
+@pytest.mark.parametrize(
+    ("state", "stale", "expected"),
+    [case for case in READING_PER_RANGE if case[2] != NORMAL],
+)
+async def test_only_normal_follows_the_display_style(hass, state, stale, expected) -> None:
+    """Warning ranges and the stale colour stay RGB in colour temperature mode."""
+    turn_on, _ = await _run(
+        hass,
+        state=state,
+        unit="mmol/L",
+        stale=stale,
+        normal_color_mode="color_temp",
+        normal_color_temp_kelvin=2730,
+    )
+
+    # _color() already asserts that no colour temperature came along.
+    assert _color(turn_on) == expected
 
 
 async def test_identical_window_times_mean_all_day(hass) -> None:
