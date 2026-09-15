@@ -37,12 +37,6 @@ jobs:
         uses: hacs/action@main
         with:
           category: integration
-          # The brands check wants the domain to exist in home-assistant/brands,
-          # which only accepts integrations that ship with Home Assistant or are
-          # in the HACS default list. This one is installed as a custom
-          # repository, so the check can only fail here; drop the ignore once a
-          # brands pull request has been merged.
-          ignore: brands
           # The action posts its result as a pull request comment by default,
           # which is what the "pull-requests: write" permission above used to be
           # for. The job status carries the same information, so the write

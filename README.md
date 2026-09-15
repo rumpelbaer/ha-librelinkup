@@ -7,8 +7,7 @@ how fresh the reading is.
 > **Not a medical device, and not affiliated with Abbott.** See
 > [Disclaimer](#disclaimer) before using this.
 
-Current development version: **0.1.0**. Not released yet — install it as a HACS
-custom repository or by hand.
+Current release: **0.1.0**. Install it as a HACS custom repository or by hand.
 
 ## Features
 
