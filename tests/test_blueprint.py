@@ -522,3 +522,243 @@ async def test_real_entity_is_classified_in_either_display_unit(
         await hass.async_block_till_done()
 
         assert _color(turn_on) == expected
+
+
+SLEEP = "input_boolean.sleep_mode"
+PRESENCE_INPUT = {
+    "activation_mode": "presence",
+    "presence_entities": ["person.a"],
+    "sleep_mode_entity": SLEEP,
+}
+
+
+@pytest.mark.parametrize(
+    ("presence", "sleep", "expect_on"),
+    [
+        ("not_home", "off", False),
+        ("not_home", "on", False),
+        ("home", "on", False),
+        ("home", "off", True),
+    ],
+)
+async def test_presence_and_sleep_truth_table(hass, presence, sleep, expect_on) -> None:
+    hass.states.async_set("person.a", presence)
+    hass.states.async_set(SLEEP, sleep)
+
+    turn_on, turn_off = await _run(hass, state="6.4", unit="mmol/L", **PRESENCE_INPUT)
+
+    if expect_on:
+        assert not turn_off
+        assert _color(turn_on) == NORMAL
+    else:
+        assert not turn_on
+        assert len(turn_off) == 1
+
+
+async def _transition(hass, person, sleep, change):
+    """Run with the starting state, apply a change, return calls since then."""
+    hass.states.async_set("person.a", person)
+    hass.states.async_set(SLEEP, sleep)
+    turn_on, turn_off = await _run(hass, state="6.4", unit="mmol/L", **PRESENCE_INPUT)
+    turn_on.clear()
+    turn_off.clear()
+
+    entity, new_state = change
+    hass.states.async_set(entity, new_state)
+    await hass.async_block_till_done()
+
+    return turn_on, turn_off
+
+
+async def test_leaving_home_turns_the_light_off(hass) -> None:
+    turn_on, turn_off = await _transition(hass, "home", "off", ("person.a", "not_home"))
+    assert not turn_on
+    assert len(turn_off) == 1
+
+
+async def test_coming_home_without_sleep_shows_the_current_color(hass) -> None:
+    turn_on, turn_off = await _transition(hass, "not_home", "off", ("person.a", "home"))
+    assert not turn_off
+    assert _color(turn_on) == NORMAL
+
+
+async def test_coming_home_during_sleep_keeps_the_light_off(hass) -> None:
+    turn_on, turn_off = await _transition(hass, "not_home", "on", ("person.a", "home"))
+    assert not turn_on
+    assert len(turn_off) == 1
+
+
+async def test_sleep_on_while_home_turns_the_light_off(hass) -> None:
+    turn_on, turn_off = await _transition(hass, "home", "off", (SLEEP, "on"))
+    assert not turn_on
+    assert len(turn_off) == 1
+
+
+async def test_sleep_off_while_home_shows_the_current_color(hass) -> None:
+    turn_on, turn_off = await _transition(hass, "home", "on", (SLEEP, "off"))
+    assert not turn_off
+    assert _color(turn_on) == NORMAL
+
+
+@pytest.mark.parametrize("new_sleep", ["on", "off"])
+async def test_sleep_change_while_away_never_turns_the_light_on(hass, new_sleep) -> None:
+    start = "off" if new_sleep == "on" else "on"
+    turn_on, turn_off = await _transition(hass, "not_home", start, (SLEEP, new_sleep))
+    assert not turn_on
+    assert len(turn_off) == 1
+
+
+async def test_sleep_change_while_away_with_leave_unchanged_does_nothing(hass) -> None:
+    hass.states.async_set("person.a", "not_home")
+    hass.states.async_set(SLEEP, "on")
+    turn_on, turn_off = await _run(
+        hass, state="6.4", unit="mmol/L", inactive_behavior="leave_unchanged", **PRESENCE_INPUT
+    )
+    turn_on.clear()
+    turn_off.clear()
+
+    hass.states.async_set(SLEEP, "off")
+    await hass.async_block_till_done()
+
+    assert not turn_on
+    assert not turn_off
+
+
+async def test_sleep_mode_is_optional_and_not_required() -> None:
+    config = _blueprint().inputs["sleep_mode_entity"]
+    assert "default" in config
+
+
+async def test_no_sleep_helper_keeps_the_previous_behaviour(hass) -> None:
+    turn_on, turn_off = await _run(hass, state="6.4", unit="mmol/L")
+    assert not turn_off
+    assert _color(turn_on) == NORMAL
+
+
+@pytest.mark.parametrize("sleep", ["on", "off"])
+@pytest.mark.parametrize("mode", ["always", "time"])
+async def test_sleep_is_ignored_without_a_presence_mode(hass, mode, sleep) -> None:
+    hass.states.async_set(SLEEP, sleep)
+    turn_on, turn_off = await _run(
+        hass,
+        state="6.4",
+        unit="mmol/L",
+        activation_mode=mode,
+        active_start_time="00:00:00",
+        active_end_time="00:00:00",
+        sleep_mode_entity=SLEEP,
+    )
+    assert not turn_off
+    assert _color(turn_on) == NORMAL
+
+
+@pytest.mark.parametrize("mode", ["presence", "time_and_presence"])
+@pytest.mark.parametrize("sleep", ["on", "off"])
+async def test_away_uses_inactive_behavior_regardless_of_sleep(hass, mode, sleep) -> None:
+    hass.states.async_set("person.a", "not_home")
+    hass.states.async_set(SLEEP, sleep)
+    turn_on, turn_off = await _run(
+        hass,
+        state="6.4",
+        unit="mmol/L",
+        **{**PRESENCE_INPUT, "activation_mode": mode},
+        active_start_time="00:00:00",
+        active_end_time="00:00:00",
+    )
+    assert not turn_on
+    assert len(turn_off) == 1
+
+
+@pytest.mark.parametrize(("sleep", "lamp_off"), [("on", True), ("off", False)])
+async def test_time_and_presence_home_in_window(hass, sleep, lamp_off) -> None:
+    hass.states.async_set("person.a", "home")
+    hass.states.async_set(SLEEP, sleep)
+    turn_on, turn_off = await _run(
+        hass,
+        state="6.4",
+        unit="mmol/L",
+        **{**PRESENCE_INPUT, "activation_mode": "time_and_presence"},
+        active_start_time="00:00:00",
+        active_end_time="00:00:00",
+    )
+    if lamp_off:
+        assert not turn_on and len(turn_off) == 1
+    else:
+        assert not turn_off and _color(turn_on) == NORMAL
+
+
+# A window two to three hours ahead, so the time window is not active now.
+def _closed_window() -> dict:
+    from datetime import datetime, timedelta
+
+    now = datetime.now()
+    start = (now + timedelta(hours=2)).strftime("%H:%M:00")
+    end = (now + timedelta(hours=3)).strftime("%H:%M:00")
+    return {"active_start_time": start, "active_end_time": end}
+
+
+@pytest.mark.parametrize("sleep", ["on", "off"])
+async def test_time_or_presence_time_only_ignores_sleep(hass, sleep) -> None:
+    hass.states.async_set("person.a", "not_home")
+    hass.states.async_set(SLEEP, sleep)
+    turn_on, turn_off = await _run(
+        hass,
+        state="6.4",
+        unit="mmol/L",
+        **{**PRESENCE_INPUT, "activation_mode": "time_or_presence"},
+        active_start_time="00:00:00",
+        active_end_time="00:00:00",
+    )
+    assert not turn_off
+    assert _color(turn_on) == NORMAL
+
+
+@pytest.mark.parametrize(
+    ("window", "sleep", "lamp_off"),
+    [
+        ("closed", "on", True),
+        ("closed", "off", False),
+        ("open", "on", True),
+    ],
+)
+async def test_time_or_presence_home(hass, window, sleep, lamp_off) -> None:
+    hass.states.async_set("person.a", "home")
+    hass.states.async_set(SLEEP, sleep)
+    times = (
+        _closed_window()
+        if window == "closed"
+        else {"active_start_time": "00:00:00", "active_end_time": "00:00:00"}
+    )
+    turn_on, turn_off = await _run(
+        hass,
+        state="6.4",
+        unit="mmol/L",
+        **{**PRESENCE_INPUT, "activation_mode": "time_or_presence"},
+        **times,
+    )
+    if lamp_off:
+        assert not turn_on and len(turn_off) == 1
+    else:
+        assert not turn_off and _color(turn_on) == NORMAL
+
+
+@pytest.mark.parametrize("new_sleep", ["on", "off"])
+async def test_time_or_presence_sleep_change_while_away_changes_nothing(hass, new_sleep) -> None:
+    hass.states.async_set("person.a", "not_home")
+    hass.states.async_set(SLEEP, "off" if new_sleep == "on" else "on")
+    turn_on, turn_off = await _run(
+        hass,
+        state="6.4",
+        unit="mmol/L",
+        **{**PRESENCE_INPUT, "activation_mode": "time_or_presence"},
+        active_start_time="00:00:00",
+        active_end_time="00:00:00",
+    )
+    turn_on.clear()
+    turn_off.clear()
+
+    hass.states.async_set(SLEEP, new_sleep)
+    await hass.async_block_till_done()
+
+    assert not turn_off
+    assert _color(turn_on) == NORMAL

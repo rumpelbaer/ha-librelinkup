@@ -273,6 +273,20 @@ blueprint:
         entity:
           multiple: true
 
+    sleep_mode_entity:
+      name: Sleep mode helper
+      description: >
+        Optional input_boolean controlled by an iPhone Sleep Focus automation.
+        Only used by the presence activation modes (presence, time_and_presence,
+        time_or_presence). While at least one presence entity is present and
+        this helper is on, the glucose light stays off. Ignored by "always" and
+        "time", and when nobody is present. It never switches the light on.
+        Leave empty to disable.
+      default: []
+      selector:
+        entity:
+          domain: input_boolean
+
     inactive_behavior:
       name: Behavior while inactive
       description: >
@@ -296,6 +310,9 @@ trigger:
 
   - platform: state
     entity_id: !input presence_entities
+
+  - platform: state
+    entity_id: !input sleep_mode_entity
 
   - platform: time
     at: !input active_start_time
@@ -337,6 +354,7 @@ variables:
   active_end: !input active_end_time
   persons: !input presence_entities
   inactive_action: !input inactive_behavior
+  sleep_input: !input sleep_mode_entity
 
   # Home Assistant lets the user pick the display unit of a blood glucose
   # entity, so the state is not necessarily in mmol/L. -1 marks a state that is
@@ -358,38 +376,50 @@ variables:
   glucose_mmol: >-
     {{ 0 if not glucose_usable else (glucose_raw / 18.0 if glucose_unit == 'mg/dL' else glucose_raw) }}
 
+  # Time window and presence, evaluated once and shared by the activation
+  # check and the sleep override.
+  time_active: >-
+    {% set current = now().strftime('%H:%M:%S') %}
+    {% if active_start == active_end %}
+      {{ true }}
+    {% elif active_start < active_end %}
+      {{ active_start <= current < active_end }}
+    {% else %}
+      {{ current >= active_start or current < active_end }}
+    {% endif %}
+  # An entity counts as present when its state is "home" or "on".
+  person_present: >-
+    {% set ns = namespace(present=false) %}
+    {% for entity in persons %}
+      {% if states(entity) in ['home', 'on'] %}
+        {% set ns.present = true %}
+      {% endif %}
+    {% endfor %}
+    {{ ns.present }}
+  # Sleep mode only acts while a presence mode is configured and somebody is
+  # actually present. It is ignored by "always" and "time", and by a
+  # "time_or_presence" activation that comes from the time window alone.
+  sleep_override_active: >-
+    {% set sleepers = [sleep_input] if sleep_input is string else sleep_input %}
+    {{ activation in ['presence', 'time_and_presence', 'time_or_presence']
+       and person_present
+       and (sleepers | select('is_state', 'on') | list | count > 0) }}
+
 action:
   - choose:
       - conditions:
           - condition: template
             value_template: >
-              {% set current = now().strftime('%H:%M:%S') %}
-
-              {% if active_start == active_end %}
-                {% set time_active = true %}
-              {% elif active_start < active_end %}
-                {% set time_active = active_start <= current < active_end %}
-              {% else %}
-                {% set time_active = current >= active_start or current < active_end %}
-              {% endif %}
-
-              {% set ns = namespace(presence_active=false) %}
-              {% for entity in persons %}
-                {% if states(entity) in ['home', 'on'] %}
-                  {% set ns.presence_active = true %}
-                {% endif %}
-              {% endfor %}
-
               {% if activation == 'always' %}
                 {{ false }}
               {% elif activation == 'time' %}
                 {{ not time_active }}
               {% elif activation == 'presence' %}
-                {{ not ns.presence_active }}
+                {{ not person_present }}
               {% elif activation == 'time_and_presence' %}
-                {{ not (time_active and ns.presence_active) }}
+                {{ not (time_active and person_present) }}
               {% elif activation == 'time_or_presence' %}
-                {{ not (time_active or ns.presence_active) }}
+                {{ not (time_active or person_present) }}
               {% else %}
                 {{ false }}
               {% endif %}
@@ -404,6 +434,14 @@ action:
 
     default:
       - choose:
+          # Sleep override: see sleep_override_active.
+          - conditions:
+              - condition: template
+                value_template: "{{ sleep_override_active }}"
+            sequence:
+              - service: light.turn_off
+                target: !input target_light
+
           - conditions:
               - condition: template
                 value_template: >-
