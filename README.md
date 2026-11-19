@@ -189,6 +189,17 @@ A login that fails for another reason — for example because the account has to
 confirm something in the LibreLinkUp app — does **not** ask for the password. It
 raises a repair issue instead, because a new password would not fix it.
 
+## Dashboard card
+
+To show the reading on a dashboard, [SugarTV Card](https://github.com/wiltodelta/homeassistant-sugartv-card) (HACS) works with this integration out of the box. Point it at the glucose sensor, and it picks up `Trend` (`not_determined` included) and `Last Reading` on its own:
+
+```yaml
+type: custom:sugartv-card
+glucose_value: sensor.person_glucose
+```
+
+![SugarTV Card in a wide and a tall dashboard slot](https://raw.githubusercontent.com/wiltodelta/homeassistant-sugartv-card/v0.22.0/sugartv-card-layouts.png)
+
 ## Glucose light blueprint
 
 `blueprints/automation/rumpelbaer/glucose_light.yaml` colours a light by glucose
